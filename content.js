@@ -1,4 +1,4 @@
-// ------------- utils -------------
+// -------- utils --------
 function getCourseIdFromPath() {
   const m = location.pathname.match(/\/courses\/(\d+)/);
   if (!m) throw new Error("Open this on a Canvas course page (/courses/<id>).");
@@ -26,21 +26,59 @@ async function getLatestCsrfFromBackground() {
   });
 }
 
-// ------------- read-only -------------
-async function fetchMyCourses() {
+// Normalize term labels for fuzzy matching
+function norm(s) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/spring\s*'?([0-9]{2})\b/g, "spring 20$1") // spring '23 => spring 2023
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+function isTermMatch(course, wantedLabel) {
+  const w = norm(wantedLabel);
+  const termName = norm(
+    course?.enrollment_term?.name || course?.term?.name || "",
+  );
+  const courseName = norm(course?.name || "");
+  if (!w) return true; // no filter => everything
+  // direct includes in term name or course name
+  if (termName.includes(w)) return true;
+  if (courseName.includes(w)) return true;
+  // handle common alt orders like "2023 spring"
+  if (w === "spring 2023") {
+    if (
+      termName.includes("2023 spring") || courseName.includes("2023 spring")
+    ) return true;
+    // as a fallback, use dates if present (Jan–Jun 2023)
+    const start = course.start_at ? new Date(course.start_at) : null;
+    const end = course.end_at ? new Date(course.end_at) : null;
+    if (start && start.getFullYear() === 2023 && start.getMonth() <= 5) {
+      return true; // Jan(0)–Jun(5)
+    }
+    if (end && end.getFullYear() === 2023 && end.getMonth() <= 6) return true;
+  }
+  return false;
+}
+
+// -------- read-only (now with term filter) --------
+async function fetchMyCoursesFiltered(termFilter) {
+  // include[]=term helps ensure term info comes back
   const base =
-    `${location.origin}/api/v1/courses?enrollment_state=active&per_page=100`;
+    `${location.origin}/api/v1/courses?enrollment_state=active&per_page=100&include[]=term`;
   const all = await fetchAllCanvas(base);
-  return all.map((c) => ({
+  const mapped = all.map((c) => ({
     id: c.id,
     name: c.name,
     course_code: c.course_code,
-    term: c.term,
-    enrollment_term: c.enrollment_term,
+    term: c.term, // sometimes present
+    enrollment_term: c.enrollment_term, // sometimes present
+    start_at: c.start_at,
+    end_at: c.end_at,
   }));
+  return mapped.filter((c) => isTermMatch(c, termFilter));
 }
 
-// ------------- recipient search (by name within current course) -------------
+// -------- recipient search (by name within current course) --------
 async function searchOneRecipient(courseId, fullName) {
   const url = new URL(`${location.origin}/api/v1/search/recipients`);
   url.searchParams.set("search", fullName.trim());
@@ -77,11 +115,10 @@ async function searchOneRecipient(courseId, fullName) {
   return { chosen: null, candidates: users.slice(0, 10) };
 }
 
-// ------------- send (FormData + recipients[] + shared context_code) -------------
+// -------- send (FormData + recipients[] + shared context_code; uses sniffed CSRF) --------
 async function sendOneWithSession({ userId, subject, body, contextCode }) {
   if (!body?.trim()) throw new Error("Message body is required");
 
-  // 1) Get the most recent CSRF from background cache (prefers header token, else cookie token)
   let csrf = await getLatestCsrfFromBackground();
   if (!csrf) {
     throw new Error(
@@ -89,9 +126,8 @@ async function sendOneWithSession({ userId, subject, body, contextCode }) {
     );
   }
 
-  // Build form body
   const fd = new FormData();
-  fd.append("recipients[]", String(userId)); // IMPORTANT: recipients[]
+  fd.append("recipients[]", String(userId));
   if (subject) fd.append("subject", subject);
   fd.append("body", body);
   fd.append("group_conversation", "false");
@@ -100,18 +136,13 @@ async function sendOneWithSession({ userId, subject, body, contextCode }) {
 
   const url = `${location.origin}/api/v1/conversations`;
 
-  // 2) Try once with the cached token
   let res = await fetch(url, {
     method: "POST",
     credentials: "include",
-    headers: {
-      "Accept": "application/json",
-      "X-CSRF-Token": csrf,
-    },
+    headers: { "Accept": "application/json", "X-CSRF-Token": csrf },
     body: fd,
   });
 
-  // 3) If it rotated and we got a 422, re-fetch latest token and retry once
   if (res.status === 422) {
     const fresh = await getLatestCsrfFromBackground();
     if (fresh && fresh !== csrf) {
@@ -132,30 +163,34 @@ async function sendOneWithSession({ userId, subject, body, contextCode }) {
   return true;
 }
 
-// ------------- message router -------------
+// -------- router --------
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
+      if (!/^https:\/\/.*\.instructure\.com$/.test(location.origin)) {
+        sendResponse({ ok: false, error: "Not on a Canvas origin." });
+        return;
+      }
+
+      if (msg.type === "FETCH_COURSES_FILTERED") {
+        const courses = await fetchMyCoursesFiltered(
+          msg.termFilter || "Spring 2023",
+        );
+        sendResponse({ ok: true, courses });
+        return;
+      }
+
       if (msg.type === "FETCH_COURSES") {
-        if (!/^https:\/\/.*\.instructure\.com$/.test(location.origin)) {
-          sendResponse({ ok: false, error: "Not on a Canvas origin." });
-          return;
-        }
-        const courses = await fetchMyCourses();
+        // kept for backwards compatibility (no filter)
+        const courses = await fetchMyCoursesFiltered("");
         sendResponse({ ok: true, courses });
         return;
       }
 
       if (msg.type === "SEND_ONE_VIA_CANVAS") {
-        if (!/^https:\/\/.*\.instructure\.com$/.test(location.origin)) {
-          sendResponse({ ok: false, error: "Not on a Canvas origin." });
-          return;
-        }
-
         const currentCourseId = getCourseIdFromPath();
         const { recipientTerm, subject, body } = msg;
 
-        // 1) Find recipient by name within this course
         const { chosen, candidates } = await searchOneRecipient(
           currentCourseId,
           recipientTerm,
@@ -171,7 +206,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        // 2) Compute a valid shared context_code
         const shared = Object.keys(chosen.common_courses || {}); // e.g., ["500008"]
         const contextCode = shared.length
           ? `course_${
@@ -181,7 +215,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           }`
           : null;
 
-        // 3) Send the message
         await sendOneWithSession({
           userId: chosen.id,
           subject,
@@ -199,5 +232,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
   })();
 
-  return true; // keep the channel open for async work above
+  return true;
 });

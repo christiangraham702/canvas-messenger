@@ -16,7 +16,6 @@ async function refreshCsrfStatus() {
     box.textContent = "Unable to read CSRF cache.";
     return;
   }
-
   const h = resp.sources.header;
   const c = resp.sources.cookie;
   const lines = [];
@@ -37,7 +36,7 @@ async function refreshCsrfStatus() {
 function renderCourses(courses) {
   const results = document.getElementById("results");
   if (!courses || courses.length === 0) {
-    results.innerHTML = "<p><em>No active enrollments returned.</em></p>";
+    results.innerHTML = "<p><em>No courses matched this term.</em></p>";
     return;
   }
   const list = document.createElement("ul");
@@ -78,14 +77,17 @@ document.getElementById("clearCsrf").addEventListener("click", async () => {
   await refreshCsrfStatus();
   alert("Cleared cached CSRF tokens.");
 });
-
 document.addEventListener("DOMContentLoaded", refreshCsrfStatus);
 
 document.getElementById("fetchBtn").addEventListener("click", async () => {
   const status = document.getElementById("status");
   const results = document.getElementById("results");
+  const termFilter = (document.getElementById("termFilter").value || "").trim();
   results.innerHTML = "";
-  status.textContent = "Requesting courses from the Canvas API…";
+  status.textContent =
+    `Requesting courses from the Canvas API and filtering by "${
+      termFilter || "—"
+    }"…`;
 
   try {
     const tab = await getActiveTab();
@@ -94,11 +96,14 @@ document.getElementById("fetchBtn").addEventListener("click", async () => {
         `<span class="error">Open this on a Canvas page (https://*.instructure.com/...)</span>`;
       return;
     }
+
     const resp = await chrome.tabs.sendMessage(tab.id, {
-      type: "FETCH_COURSES",
+      type: "FETCH_COURSES_FILTERED",
+      termFilter,
     });
     if (resp?.ok) {
-      status.textContent = `Fetched ${resp.courses.length} course(s).`;
+      status.textContent =
+        `Showing ${resp.courses.length} course(s) for "${termFilter}".`;
       renderCourses(resp.courses);
     } else {
       status.innerHTML = `<span class="error">Failed: ${
@@ -149,7 +154,6 @@ document.getElementById("sendOneBtn").addEventListener("click", async () => {
 
     if (resp?.ok) {
       sendStatus.textContent = `Sent message to user ID ${resp.userId}.`;
-      await refreshCsrfStatus(); // token will likely rotate—refresh display
     } else {
       sendStatus.innerHTML = `<span class="error">${
         resp?.error || "Failed to send."

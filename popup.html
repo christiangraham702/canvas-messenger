@@ -3,133 +3,203 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>Canvas CSRF Sniffer Messenger</title>
+  <title>CourseLynx Messenger</title>
   <style>
     :root {
-      color-scheme: light dark;
+      --royal-blue: #0052cc;
+      --royal-blue-dark: #003d99;
+      --white: #ffffff;
+      --light-gray: #f3f3f3;
+      --text-gray: #555;
+      --error-red: #b00020;
     }
 
     body {
+      margin: 0;
+      padding: 0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      margin: 12px;
+      background: var(--white);
+      color: #000;
       width: 380px;
+      border-radius: 10px;
+      overflow: hidden;
     }
 
-    h3 {
-      margin: 0 0 8px;
+    header {
+      background: var(--royal-blue);
+      color: var(--white);
+      padding: 14px 16px;
+    }
+
+    header h3 {
+      margin: 0;
+      font-size: 1.2rem;
+    }
+
+    section {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--light-gray);
     }
 
     h4 {
-      margin: 14px 0 6px;
-    }
-
-    button {
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid #ccc;
-      cursor: pointer;
-    }
-
-    .btn-wide {
-      width: 100%;
+      margin: 0 0 8px;
+      font-size: 1rem;
+      color: var(--royal-blue);
     }
 
     label {
       display: block;
-      margin: 6px 0 4px;
+      margin: 8px 0 4px;
       font-weight: 600;
+      font-size: 0.9rem;
     }
 
     input,
     textarea {
       width: 100%;
       box-sizing: border-box;
-      padding: 6px;
-      border-radius: 6px;
+      padding: 8px;
       border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      margin-bottom: 8px;
     }
 
     textarea {
-      height: 100px;
+      height: 90px;
+      resize: vertical;
+    }
+
+    button {
+      background: var(--royal-blue);
+      color: var(--white);
+      border: none;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 6px;
+      width: 100%;
+    }
+
+    button:hover {
+      background: var(--royal-blue-dark);
     }
 
     .row {
       display: flex;
-      gap: .5rem;
+      gap: 0.5rem;
       align-items: center;
     }
 
     .status {
       margin-top: 6px;
-      font-size: 12px;
-      color: #666;
+      font-size: 0.8rem;
+      color: var(--text-gray);
       white-space: pre-wrap;
     }
 
     .error {
-      color: #b00020;
-    }
-
-    .small {
-      font-size: 12px;
+      color: var(--error-red);
     }
 
     ul {
-      padding-left: 16px;
+      padding-left: 18px;
       margin: 6px 0 0;
     }
 
     li {
       margin: 2px 0;
+      font-size: 0.9rem;
     }
 
     code {
-      background: #ececec;
+      background: var(--light-gray);
       padding: 1px 4px;
       border-radius: 4px;
+      font-size: 0.85rem;
     }
 
-    .section {
-      margin-top: 14px;
-      padding-top: 10px;
-      border-top: 1px solid #e5e5e5;
+    .small {
+      font-size: 0.8rem;
+      color: var(--text-gray);
     }
 
-    .pill {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: #eee;
-      margin-left: 6px;
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .toolbar button {
+      width: auto;
+      padding: 4px 8px;
+      font-size: 0.7rem;
+    }
+
+    /* 👇 New smaller style for CSRF section */
+    .csrf-panel {
+      font-size: 0.75rem;
+      color: var(--text-gray);
+      background: var(--light-gray);
+      border-radius: 6px;
+      padding: 8px;
+    }
+
+    .csrf-panel strong {
+      font-size: 0.8rem;
+      color: #333;
+    }
+
+    .csrf-panel button {
+      background: none;
+      border: none;
+      color: var(--royal-blue);
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0;
+      margin-left: auto;
+      cursor: pointer;
+    }
+
+    .csrf-panel .status {
+      font-size: 0.7rem;
+      margin: 4px 0 0;
     }
   </style>
 </head>
 
 <body>
-  <h3>Canvas CSRF Sniffer Messenger</h3>
-  <p class="small">Open this on <code>https://*.instructure.com/</code> pages (ideally on a
-    <code>/courses/&lt;id&gt;/...</code> URL).</p>
+  <header>
+    <h3>CourseLynx Messenger</h3>
+  </header>
 
-  <div class="section" style="border-top:none;padding-top:0">
-    <div class="row" style="justify-content:space-between">
-      <strong>CSRF status</strong>
-      <button id="refreshCsrf" title="Re-check cached token">⟳</button>
+  <!-- CSRF panel (subtle) -->
+  <section>
+    <div class="csrf-panel">
+      <div class="toolbar">
+        <strong>CSRF Token (dev info)</strong>
+        <button id="refreshCsrf">Refresh</button>
+      </div>
+      <div id="csrfStatus" class="status">loading…</div>
+      <button id="clearCsrf" style="margin-top:4px;">Clear</button>
     </div>
-    <div id="csrfStatus" class="status">loading…</div>
-    <div class="row" style="gap:.5rem;margin-top:6px">
-      <button id="clearCsrf" class="small">Clear cached token</button>
-    </div>
-    <p class="small">Tip: if empty, send any message in the Canvas Inbox UI once; we’ll capture the token automatically.
-    </p>
-  </div>
+  </section>
 
-  <h4>Read-only test</h4>
-  <button id="fetchBtn" class="btn-wide">Fetch My Courses</button>
-  <div id="status" class="status"></div>
-  <div id="results"></div>
+  <section>
+    <h4>My Courses</h4>
+    <label for="termFilter">Only show courses in this term</label>
+    <input id="termFilter" value="Spring 2023" />
+    <button id="fetchBtn">Fetch Courses</button>
+    <div id="status" class="status"></div>
+    <div id="results"></div>
+  </section>
 
-  <div class="section">
-    <h4>Send to ONE classmate (Canvas Inbox)</h4>
+  <section>
+    <h4>Send to One Classmate</h4>
     <label for="recipientTerm">Recipient full name</label>
     <input id="recipientTerm" placeholder="e.g., Cory Combas" />
 
@@ -139,10 +209,10 @@
     <label for="oneBody">Message</label>
     <textarea id="oneBody" placeholder="Write a short message…"></textarea>
 
-    <button id="sendOneBtn" class="btn-wide">Send to this person</button>
+    <button id="sendOneBtn">Send Message</button>
     <div id="sendStatus" class="status"></div>
     <div id="candidates"></div>
-  </div>
+  </section>
 
   <script src="popup.js"></script>
 </body>
