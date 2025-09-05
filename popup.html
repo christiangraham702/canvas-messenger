@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Canvas CSRF Sniffer Messenger</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 12px;
+      width: 380px;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+    }
+
+    h4 {
+      margin: 14px 0 6px;
+    }
+
+    button {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+    }
+
+    .btn-wide {
+      width: 100%;
+    }
+
+    label {
+      display: block;
+      margin: 6px 0 4px;
+      font-weight: 600;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+    }
+
+    textarea {
+      height: 100px;
+    }
+
+    .row {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+    }
+
+    .status {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #666;
+      white-space: pre-wrap;
+    }
+
+    .error {
+      color: #b00020;
+    }
+
+    .small {
+      font-size: 12px;
+    }
+
+    ul {
+      padding-left: 16px;
+      margin: 6px 0 0;
+    }
+
+    li {
+      margin: 2px 0;
+    }
+
+    code {
+      background: #ececec;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+
+    .section {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid #e5e5e5;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #eee;
+      margin-left: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <h3>Canvas CSRF Sniffer Messenger</h3>
+  <p class="small">Open this on <code>https://*.instructure.com/</code> pages (ideally on a
+    <code>/courses/&lt;id&gt;/...</code> URL).</p>
+
+  <div class="section" style="border-top:none;padding-top:0">
+    <div class="row" style="justify-content:space-between">
+      <strong>CSRF status</strong>
+      <button id="refreshCsrf" title="Re-check cached token">⟳</button>
+    </div>
+    <div id="csrfStatus" class="status">loading…</div>
+    <div class="row" style="gap:.5rem;margin-top:6px">
+      <button id="clearCsrf" class="small">Clear cached token</button>
+    </div>
+    <p class="small">Tip: if empty, send any message in the Canvas Inbox UI once; we’ll capture the token automatically.
+    </p>
+  </div>
+
+  <h4>Read-only test</h4>
+  <button id="fetchBtn" class="btn-wide">Fetch My Courses</button>
+  <div id="status" class="status"></div>
+  <div id="results"></div>
+
+  <div class="section">
+    <h4>Send to ONE classmate (Canvas Inbox)</h4>
+    <label for="recipientTerm">Recipient full name</label>
+    <input id="recipientTerm" placeholder="e.g., Cory Combas" />
+
+    <label for="oneSubject">Subject (optional)</label>
+    <input id="oneSubject" placeholder="Subject" />
+
+    <label for="oneBody">Message</label>
+    <textarea id="oneBody" placeholder="Write a short message…"></textarea>
+
+    <button id="sendOneBtn" class="btn-wide">Send to this person</button>
+    <div id="sendStatus" class="status"></div>
+    <div id="candidates"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

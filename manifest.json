@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Canvas CSRF Sniffer Messenger",
+  "version": "0.1.0",
+  "description": "Sniffs CSRF from Canvas traffic and sends a single Canvas Inbox message to a classmate.",
+  "action": { "default_popup": "popup.html" },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://*.instructure.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.instructure.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
