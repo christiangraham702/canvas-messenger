@@ -5,6 +5,19 @@ function getCourseIdFromPath() {
   return m[1];
 }
 
+// Add this helper
+async function fetchSections(courseId) {
+  const url =
+    `${location.origin}/api/v1/courses/${courseId}/sections?per_page=100`;
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`sections ${res.status} — ${txt.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  return data.map((s) => ({ id: s.id, name: s.name || `Section ${s.id}` }));
+}
+
 async function fetchAllCanvas(url, acc = []) {
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) {
@@ -184,6 +197,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // kept for backwards compatibility (no filter)
         const courses = await fetchMyCoursesFiltered("");
         sendResponse({ ok: true, courses });
+        return;
+      }
+
+      if (msg.type === "FETCH_SECTIONS") {
+        const sections = await fetchSections(msg.courseId);
+        sendResponse({ ok: true, sections });
         return;
       }
 
