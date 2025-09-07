@@ -1,5 +1,5 @@
 // popup.js (module)
-import { claimCourse, markSent, releaseClaim } from "./db.js";
+import { claimCourse, getCourseSends, markSent, releaseClaim } from "./db.js";
 
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -10,6 +10,56 @@ function fmtTime(ts) {
   if (!ts) return "—";
   const d = new Date(ts);
   return d.toLocaleTimeString();
+}
+
+// Ask content.js for sections of a course
+async function loadSectionsFromContent(tabId, courseId) {
+  const resp = await chrome.tabs.sendMessage(tabId, {
+    type: "FETCH_SECTIONS",
+    courseId,
+  });
+  if (!resp?.ok) throw new Error(resp?.error || "Failed to fetch sections");
+  return resp.sections || [];
+}
+
+// For one course, compute how many sections remain unsent this term
+async function computeCourseAvailability(tab, course) {
+  const canvasHost = new URL(tab.url).host;
+  const termLabel = getTermLabel(course) || "Spring 2023";
+  const termKey = toTermKey(termLabel);
+
+  // 1) Get sections from Canvas
+  const sections = await loadSectionsFromContent(tab.id, course.id);
+
+  // 2) Read all sends for this course+term from Supabase
+  const rows = await getCourseSends({
+    canvasDomain: canvasHost,
+    courseId: course.id,
+    termKey,
+  });
+
+  // 3) Build a set of claimed section ids (normed; note: our DB stores 0 when NULL)
+  const claimed = new Set(
+    rows.map((r) => (r.section_id === null ? 0 : Number(r.section_id))),
+  );
+
+  // 4) Count remaining
+  const allSectionIds = sections.length
+    ? sections.map((s) => Number(s.id))
+    : [0]; // if no sections returned, treat as single 0 "course-wide" unit
+  const remainingSections = allSectionIds.filter((secId) =>
+    !claimed.has(secId)
+  );
+
+  return {
+    courseId: course.id,
+    courseName: course.name || "",
+    courseCode: course.course_code || "",
+    termLabel,
+    termKey,
+    totalSections: allSectionIds.length,
+    availableSections: remainingSections.length,
+  };
 }
 
 // ==== CSRF status (unchanged) ====
@@ -47,7 +97,6 @@ document.getElementById("clearCsrf")?.addEventListener("click", async () => {
 document.addEventListener("DOMContentLoaded", refreshCsrfStatus);
 
 // ==== Term-filtered course fetch ====
-const lastCourses = []; // cache in popup to attach buttons
 
 function toTermKey(label) {
   return (label || "")
@@ -61,6 +110,9 @@ function getTermLabel(c) {
   return c?.enrollment_term?.name || c?.term?.name || "";
 }
 
+const lastCourses = []; // cache in popup to attach buttons
+const availabilityByCourseId = new Map();
+
 function renderCourses(courses) {
   const results = document.getElementById("results");
   results.innerHTML = "";
@@ -71,7 +123,7 @@ function renderCourses(courses) {
 
   const ul = document.createElement("ul");
 
-  courses.forEach((c, idx) => {
+  courses.forEach((c) => {
     const term = getTermLabel(c) || "—";
     const li = document.createElement("li");
     li.innerHTML = `
@@ -81,53 +133,30 @@ function renderCourses(courses) {
           <div class="small"><code>ID: ${c.id}</code> · Code: ${
       c.course_code || "—"
     } · Term: ${term}</div>
-
-          <div class="small" style="margin-top:6px;">
-            <button class="btn-load-sections" data-idx="${idx}">Load Sections</button>
-            <span id="sections-wrap-${idx}" style="margin-left:6px;"></span>
-          </div>
+          <div class="small" id="avail-${c.id}" style="margin-top:6px;">Checking availability…</div>
         </div>
-
         <div style="min-width:150px; text-align:right;">
-          <button class="btn-claim" data-idx="${idx}" title="Dev: claim in DB only">Claim</button>
-          <button class="btn-mark" data-idx="${idx}" title="Dev: mark sent in DB">Mark Sent</button>
-          <button class="btn-release" data-idx="${idx}" title="Dev: release claim">Release</button>
+          <button class="btn-send" data-courseid="${c.id}" disabled>Send Link</button>
         </div>
       </div>
-      <div class="status small" id="row-status-${idx}"></div>
     `;
     ul.appendChild(li);
   });
 
   results.appendChild(ul);
 
-  // Wire up buttons
-  results.querySelectorAll(".btn-load-sections").forEach((btn) => {
-    btn.addEventListener(
-      "click",
-      () => loadSectionsForRow(parseInt(btn.dataset.idx, 10)),
-    );
-  });
-  results.querySelectorAll(".btn-claim").forEach((btn) => {
-    btn.addEventListener(
-      "click",
-      () => devClaimCourse(parseInt(btn.dataset.idx, 10)),
-    );
-  });
-  results.querySelectorAll(".btn-mark").forEach((btn) => {
-    btn.addEventListener(
-      "click",
-      () => devMarkSent(parseInt(btn.dataset.idx, 10)),
-    );
-  });
-  results.querySelectorAll(".btn-release").forEach((btn) => {
-    btn.addEventListener(
-      "click",
-      () => devRelease(parseInt(btn.dataset.idx, 10)),
-    );
+  // Wire "Send" (we'll implement later to actually broadcast)
+  results.querySelectorAll(".btn-send").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const courseId = Number(btn.dataset.courseid);
+      const avail = availabilityByCourseId.get(courseId);
+      if (!avail || avail.availableSections === 0) return;
+      alert(
+        `Ready to send for ${avail.courseName} — ${avail.availableSections} section(s) available. (Next step: implement send loop)`,
+      );
+    });
   });
 }
-
 // Helper to get chosen section for a row
 function getChosenSection(idx) {
   const sel = document.querySelector(`#sections-wrap-${idx} select`);
@@ -190,16 +219,46 @@ document.getElementById("fetchBtn").addEventListener("click", async () => {
       type: "FETCH_COURSES_FILTERED",
       termFilter,
     });
-    if (resp?.ok) {
-      lastCourses.length = 0;
-      lastCourses.push(...resp.courses);
-      status.textContent =
-        `Showing ${resp.courses.length} course(s) for "${termFilter}".`;
-      renderCourses(resp.courses);
-    } else {
+    if (!resp?.ok) {
       status.innerHTML = `<span class="error">Failed: ${
         resp?.error || "unknown error"
       }</span>`;
+      return;
+    }
+
+    lastCourses.length = 0;
+    lastCourses.push(...resp.courses);
+    status.textContent =
+      `Showing ${resp.courses.length} course(s) for "${termFilter}".`;
+    renderCourses(resp.courses);
+
+    // Now compute availability per course (async) and update the UI as results come in
+    for (const course of resp.courses) {
+      try {
+        const avail = await computeCourseAvailability(tab, course);
+        availabilityByCourseId.set(course.id, avail);
+        const label = document.getElementById(`avail-${course.id}`);
+        if (label) {
+          if (avail.availableSections > 0) {
+            label.textContent =
+              `Available: ${avail.availableSections} of ${avail.totalSections} section(s)`;
+            // enable the Send button
+            const btn = document.querySelector(
+              `.btn-send[data-courseid="${course.id}"]`,
+            );
+            if (btn) btn.removeAttribute("disabled");
+          } else {
+            label.textContent = `Already sent for all sections this term`;
+          }
+        }
+      } catch (e) {
+        const label = document.getElementById(`avail-${course.id}`);
+        if (label) {
+          label.innerHTML = `<span class="error">Availability error: ${
+            String(e).slice(0, 120)
+          }</span>`;
+        }
+      }
     }
   } catch (err) {
     console.error(err);
@@ -228,7 +287,7 @@ async function coursePayloadForDB(course, section /* {id,name} or null */) {
   };
 }
 
-async function devClaimCourse(idx) {
+async function _devClaimCourse(idx) {
   const st = document.getElementById(`row-status-${idx}`);
   st.textContent = "Claiming in DB…";
   try {
@@ -245,7 +304,7 @@ async function devClaimCourse(idx) {
   }
 }
 
-async function devMarkSent(idx) {
+async function _devMarkSent(idx) {
   const st = document.getElementById(`row-status-${idx}`);
   const id = st.dataset.claimId;
   if (!id) {
@@ -264,7 +323,7 @@ async function devMarkSent(idx) {
   }
 }
 
-async function devRelease(idx) {
+async function _devRelease(idx) {
   const st = document.getElementById(`row-status-${idx}`);
   const id = st.dataset.claimId;
   if (!id) {

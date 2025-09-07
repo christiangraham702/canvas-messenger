@@ -48,3 +48,31 @@ export async function markSent({ id, metadata }) {
 export async function releaseClaim({ id }) {
   return rpc("courselynx_release_claim", { _id: id });
 }
+
+// db.js (add this near the top, after SUPABASE_URL/KEY)
+async function dbSelect(pathWithQuery) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathWithQuery}`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`DB select failed ${res.status}: ${txt.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+// Public: read all sends for a course+term (any section)
+export async function getCourseSends({ canvasDomain, courseId, termKey }) {
+  // filter: canvas_domain=eq.<>, course_id=eq.<>, term_key=eq.<>
+  const qp = new URLSearchParams({
+    select: "*",
+    canvas_domain: `eq.${canvasDomain}`,
+    course_id: `eq.${courseId}`,
+    term_key: `eq.${termKey}`,
+  }).toString();
+  return dbSelect(`courselynx_sends?${qp}`);
+}

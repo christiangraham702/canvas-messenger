@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Canvas CSRF Sniffer Messenger",
+  "name": "Canvas Messenger",
   "version": "0.1.0",
-  "description": "Sniffs CSRF from Canvas traffic and sends a single Canvas Inbox message to a classmate.",
+  "description": "Automates sending message to a whole class in Canvas.",
   "action": { "default_popup": "popup.html" },
   "permissions": [
     "activeTab",

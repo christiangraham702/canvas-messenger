@@ -90,7 +90,7 @@ async function fetchMyCoursesFiltered(termFilter) {
   }));
   return mapped.filter((c) => isTermMatch(c, termFilter));
 }
-
+// For searching and seding to one person (testing)
 // -------- recipient search (by name within current course) --------
 async function searchOneRecipient(courseId, fullName) {
   const url = new URL(`${location.origin}/api/v1/search/recipients`);
