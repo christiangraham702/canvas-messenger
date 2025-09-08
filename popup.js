@@ -12,6 +12,18 @@ function fmtTime(ts) {
   return d.toLocaleTimeString();
 }
 
+function toTermKey(label) {
+  return (label || "")
+    .trim().toLowerCase()
+    .replace(/spring\s*'?([0-9]{2})\b/g, "spring 20$1")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getTermLabel(c) {
+  return c?.enrollment_term?.name || c?.term?.name || "";
+}
+
 // Ask content.js for sections of a course
 async function loadSectionsFromContent(tabId, courseId) {
   const resp = await chrome.tabs.sendMessage(tabId, {
@@ -62,7 +74,6 @@ async function computeCourseAvailability(tab, course) {
   };
 }
 
-// ==== CSRF status (unchanged) ====
 async function refreshCsrfStatus() {
   const box = document.getElementById("csrfStatus");
   const resp = await chrome.runtime.sendMessage({ type: "GET_LATEST_CSRF" });
@@ -96,18 +107,132 @@ document.getElementById("clearCsrf")?.addEventListener("click", async () => {
 });
 document.addEventListener("DOMContentLoaded", refreshCsrfStatus);
 
-// ==== Term-filtered course fetch ====
+// ========= send to everyone =============
+async function collectRemainingSectionIds(tab, course) {
+  const resp = await chrome.tabs.sendMessage(tab.id, {
+    type: "FETCH_SECTIONS",
+    courseId: course.id,
+  });
+  if (!resp?.ok) throw new Error(resp?.error || "Failed to fetch sections");
+  const sections = resp.sections || [];
+  const sectionIds = sections.length ? sections.map((s) => Number(s.id)) : [0];
 
-function toTermKey(label) {
-  return (label || "")
-    .trim().toLowerCase()
-    .replace(/spring\s*'?([0-9]{2})\b/g, "spring 20$1")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const canvasHost = new URL(tab.url).host;
+  const termLabel = getTermLabel(course);
+  const termKey = toTermKey(termLabel);
+  const rows = await getCourseSends({
+    canvasDomain: canvasHost,
+    courseId: course.id,
+    termKey,
+  });
+  const claimed = new Set(
+    rows.map((r) => r.section_id === null ? 0 : Number(r.section_id)),
+  );
+
+  return {
+    sectionIds: sectionIds.filter((id) => !claimed.has(id)),
+    canvasHost,
+    termKey,
+    termLabel,
+  };
 }
 
-function getTermLabel(c) {
-  return c?.enrollment_term?.name || c?.term?.name || "";
+async function handleSendLinkForCourse(course, statusEl) {
+  const tab =
+    (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+  const host = new URL(tab.url).host;
+  const termLabel = getTermLabel(course);
+  const termKey = toTermKey(termLabel);
+  const linkUrl = `https://courselynx.app/c/${host}/${course.id}/${termKey}`;
+  const subject = "test";
+  const body = "test";
+
+  statusEl.textContent = "Checking remaining sections…";
+  const { sectionIds, canvasHost } = await collectRemainingSectionIds(
+    tab,
+    course,
+  );
+  if (!sectionIds.length) {
+    statusEl.textContent = "Already sent for all sections.";
+    return;
+  }
+
+  // Claim all unclaimed sections up-front (one by one; collect successful claims)
+  statusEl.textContent = `Claiming ${sectionIds.length} section(s)…`;
+  const claims = [];
+  for (const sid of sectionIds) {
+    try {
+      const claim = await claimCourse({
+        canvasDomain: canvasHost,
+        courseId: course.id,
+        courseCode: course.course_code || null,
+        courseName: course.name || null,
+        sectionId: sid === 0 ? null : sid,
+        sectionName: null,
+        termKey,
+        termLabel,
+        linkUrl,
+        sender: null,
+      });
+      if (claim && !claim.already_exists) {
+        claims.push({ sectionId: sid, claimId: claim.id });
+      }
+    } catch (e) {
+      // someone else may have raced us; ignore
+    }
+  }
+  if (!claims.length) {
+    statusEl.textContent = "Nothing to send — all sections claimed.";
+    return;
+  }
+
+  // CSRF
+  const csrfResp = await chrome.runtime.sendMessage({
+    type: "GET_LATEST_CSRF",
+  });
+  if (!csrfResp?.csrf) {
+    throw new Error(
+      "Missing CSRF. Send one message in Canvas Inbox UI to prime, then try again.",
+    );
+  }
+  const csrfToken = csrfResp.csrf;
+
+  // Send once to all course students
+  statusEl.textContent = "Fetching students & sending (chunked)…";
+  const sendResp = await chrome.tabs.sendMessage(tab.id, {
+    type: "SEND_LINK_TO_COURSE",
+    courseId: course.id,
+    subject,
+    body,
+    csrfToken,
+  });
+  if (!sendResp?.ok) {
+    // release all claims if sending failed
+    for (const c of claims) {
+      try {
+        await releaseClaim({ id: c.claimId });
+      } catch {}
+    }
+    throw new Error(sendResp?.error || "Send failed");
+  }
+
+  // Mark each claimed section as sent
+  const meta = {
+    link_url: linkUrl,
+    recipients: sendResp.totalRecipients,
+    chunks: sendResp.chunks,
+  };
+  statusEl.textContent = `Marking ${claims.length} section(s) as sent…`;
+  for (const c of claims) {
+    await markSent({
+      id: c.claimId,
+      metadata: { ...meta, section_id: c.sectionId === 0 ? null : c.sectionId },
+    });
+    await new Promise((r) => setTimeout(r, 50)); // tiny spacing
+  }
+
+  statusEl.textContent =
+    `Done: sent ${sendResp.totalRecipients} message(s) across ${sendResp.chunks} chunk(s).`;
 }
 
 const lastCourses = []; // cache in popup to attach buttons
@@ -147,58 +272,20 @@ function renderCourses(courses) {
 
   // Wire "Send" (we'll implement later to actually broadcast)
   results.querySelectorAll(".btn-send").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    // in renderCourses, when wiring the .btn-send:
+    btn.addEventListener("click", async () => {
       const courseId = Number(btn.dataset.courseid);
-      const avail = availabilityByCourseId.get(courseId);
-      if (!avail || avail.availableSections === 0) return;
-      alert(
-        `Ready to send for ${avail.courseName} — ${avail.availableSections} section(s) available. (Next step: implement send loop)`,
-      );
+      const course = lastCourses.find((c) => c.id === courseId);
+      const statusEl = document.getElementById(`avail-${course.id}`);
+      btn.setAttribute("disabled", "true");
+      try {
+        await handleSendLinkForCourse(course, statusEl);
+      } catch (e) {
+        statusEl.innerHTML = `<span class="error">${String(e)}`;
+        btn.removeAttribute("disabled");
+      }
     });
   });
-}
-// Helper to get chosen section for a row
-function getChosenSection(idx) {
-  const sel = document.querySelector(`#sections-wrap-${idx} select`);
-  if (sel && sel.value) {
-    const payload = sel.options[sel.selectedIndex].dataset.payload;
-    return payload ? JSON.parse(payload) : {
-      id: Number(sel.value),
-      name: sel.options[sel.selectedIndex].textContent,
-    };
-  }
-  return null; // no selection => course-wide (null section)
-}
-
-// Load sections via content script
-async function loadSectionsForRow(idx) {
-  const st = document.getElementById(`row-status-${idx}`);
-  const wrap = document.getElementById(`sections-wrap-${idx}`);
-  st.textContent = "Loading sections…";
-  try {
-    const tab = await getActiveTab();
-    const course = lastCourses[idx];
-    const resp = await chrome.tabs.sendMessage(tab.id, {
-      type: "FETCH_SECTIONS",
-      courseId: course.id,
-    });
-    if (!resp?.ok) throw new Error(resp?.error || "Failed to fetch sections.");
-
-    const sections = resp.sections || [];
-    if (!sections.length) {
-      wrap.innerHTML = `<span class="small">No sections found.</span>`;
-    } else {
-      const opts = sections.map((s) =>
-        `<option value="${s.id}" data-payload='${JSON.stringify(s)}'>${
-          s.name || `Section ${s.id}`
-        }</option>`
-      ).join("");
-      wrap.innerHTML = `<select>${opts}</select>`;
-    }
-    st.textContent = "Sections loaded.";
-  } catch (e) {
-    st.innerHTML = `<span class="error">${String(e)}</span>`;
-  }
 }
 
 document.getElementById("fetchBtn").addEventListener("click", async () => {
@@ -263,135 +350,5 @@ document.getElementById("fetchBtn").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
     status.innerHTML = `<span class="error">${String(err)}</span>`;
-  }
-});
-
-async function coursePayloadForDB(course, section /* {id,name} or null */) {
-  const tab = await getActiveTab();
-  const canvasHost = new URL(tab.url).host; // e.g., ufl.instructure.com
-
-  const termLabel = getTermLabel(course) || "Spring 2023";
-  const termKey = toTermKey(termLabel);
-
-  return {
-    canvasDomain: canvasHost,
-    courseId: course.id,
-    courseCode: course.course_code || null,
-    courseName: course.name || null,
-    sectionId: section?.id ?? null,
-    sectionName: section?.name ?? null,
-    termKey,
-    termLabel,
-    linkUrl: `https://courselynx.app/c/${canvasHost}/${course.id}/${termKey}`,
-    sender: null,
-  };
-}
-
-async function _devClaimCourse(idx) {
-  const st = document.getElementById(`row-status-${idx}`);
-  st.textContent = "Claiming in DB…";
-  try {
-    const section = getChosenSection(idx); // <-- NEW
-    const payload = await coursePayloadForDB(lastCourses[idx], section);
-    const res = await claimCourse(payload);
-    if (!res) throw new Error("No response from claim RPC.");
-    st.textContent = res.already_exists
-      ? `Already claimed (status=${res.status})`
-      : `Claimed OK (id=${res.id})`;
-    st.dataset.claimId = res.id;
-  } catch (e) {
-    st.innerHTML = `<span class="error">${String(e)}</span>`;
-  }
-}
-
-async function _devMarkSent(idx) {
-  const st = document.getElementById(`row-status-${idx}`);
-  const id = st.dataset.claimId;
-  if (!id) {
-    st.innerHTML = `<span class="error">Claim first (no id cached).</span>`;
-    return;
-  }
-  st.textContent = "Marking sent…";
-  try {
-    const updated = await markSent({
-      id,
-      metadata: { test: true, at: new Date().toISOString() },
-    });
-    st.textContent = `Marked sent at ${(updated?.[0]?.sent_at || "now")}`;
-  } catch (e) {
-    st.innerHTML = `<span class="error">${String(e)}</span>`;
-  }
-}
-
-async function _devRelease(idx) {
-  const st = document.getElementById(`row-status-${idx}`);
-  const id = st.dataset.claimId;
-  if (!id) {
-    st.innerHTML = `<span class="error">Claim first (no id cached).</span>`;
-    return;
-  }
-  st.textContent = "Releasing claim…";
-  try {
-    await releaseClaim({ id });
-    st.textContent = "Released (if still pending).";
-  } catch (e) {
-    st.innerHTML = `<span class="error">${String(e)}</span>`;
-  }
-}
-
-// ===== Existing "Send to One" remains unchanged =====
-document.getElementById("sendOneBtn").addEventListener("click", async () => {
-  const sendStatus = document.getElementById("sendStatus");
-  const candidatesBox = document.getElementById("candidates");
-  candidatesBox.innerHTML = "";
-  sendStatus.textContent = "Searching and sending via Canvas…";
-
-  const term = (document.getElementById("recipientTerm").value || "").trim();
-  const subject = document.getElementById("oneSubject").value || "";
-  const body = document.getElementById("oneBody").value || "";
-
-  if (!term) {
-    sendStatus.innerHTML =
-      `<span class="error">Enter a recipient full name.</span>`;
-    return;
-  }
-  if (!body.trim()) {
-    sendStatus.innerHTML =
-      `<span class="error">Message body is required.</span>`;
-    return;
-  }
-
-  try {
-    const tab = await getActiveTab();
-    if (!tab || !/^https:\/\/.*\.instructure\.com\//.test(tab.url || "")) {
-      sendStatus.innerHTML =
-        `<span class="error">Open this on a Canvas course page.</span>`;
-      return;
-    }
-
-    const resp = await chrome.tabs.sendMessage(tab.id, {
-      type: "SEND_ONE_VIA_CANVAS",
-      recipientTerm: term,
-      subject,
-      body,
-    });
-
-    if (resp?.ok) {
-      sendStatus.textContent = `Sent message to user ID ${resp.userId}.`;
-      await refreshCsrfStatus();
-    } else {
-      sendStatus.innerHTML = `<span class="error">${
-        resp?.error || "Failed to send."
-      }</span>`;
-      if (resp?.candidates?.length) {
-        const list = resp.candidates.slice(0, 10).map((u) =>
-          `<li>${u.name} — id:${u.id}</li>`
-        ).join("");
-        candidatesBox.innerHTML = `<ul class="small">${list}</ul>`;
-      }
-    }
-  } catch (e) {
-    console.error(e);
-    sendStatus.innerHTML = `<span class="error">${String(e)}</span>`;
   }
 });

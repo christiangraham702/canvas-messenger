@@ -1,11 +1,6 @@
 // -------- utils --------
-function getCourseIdFromPath() {
-  const m = location.pathname.match(/\/courses\/(\d+)/);
-  if (!m) throw new Error("Open this on a Canvas course page (/courses/<id>).");
-  return m[1];
-}
 
-// Add this helper
+// get all sections for a course
 async function fetchSections(courseId) {
   const url =
     `${location.origin}/api/v1/courses/${courseId}/sections?per_page=100`;
@@ -30,7 +25,7 @@ async function fetchAllCanvas(url, acc = []) {
   const next = link.match(/<([^>]+)>;\s*rel="next"/);
   return next ? fetchAllCanvas(next[1], acc) : acc;
 }
-
+// Ask background for freshest CSRF
 async function getLatestCsrfFromBackground() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "GET_LATEST_CSRF" }, (resp) => {
@@ -39,6 +34,59 @@ async function getLatestCsrfFromBackground() {
   });
 }
 
+async function postConversation(
+  { courseId, recipientIds, subject, body, csrfToken },
+  timeoutMs = 45000,
+) {
+  const fd = new FormData();
+  recipientIds.forEach((id) => fd.append("recipients[]", String(id)));
+  if (subject) fd.append("subject", subject);
+  fd.append("body", body);
+  fd.append("context_code", `course_${courseId}`);
+  fd.append("group_conversation", "false"); // send individually
+  fd.append("bulk_message", "true"); // separate DMs per recipient
+
+  async function doPost(csrf) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${location.origin}/api/v1/conversations`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "X-CSRF-Token": csrf },
+        body: fd,
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        const err = new Error(
+          `POST /conversations ${res.status}: ${txt.slice(0, 500)}`,
+        );
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  try {
+    return await doPost(csrfToken);
+  } catch (e) {
+    if (e?.status === 422) {
+      // get freshest CSRF from background once
+      const fresh = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          { type: "GET_LATEST_CSRF" },
+          (resp) => resolve(resp?.csrf || null),
+        );
+      });
+      if (fresh && fresh !== csrfToken) return await doPost(fresh);
+    }
+    throw e;
+  }
+}
 // Normalize term labels for fuzzy matching
 function norm(s) {
   return (s || "")
@@ -47,6 +95,7 @@ function norm(s) {
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
+// to make sure correct semester
 function isTermMatch(course, wantedLabel) {
   const w = norm(wantedLabel);
   const termName = norm(
@@ -73,9 +122,8 @@ function isTermMatch(course, wantedLabel) {
   return false;
 }
 
-// -------- read-only (now with term filter) --------
 async function fetchMyCoursesFiltered(termFilter) {
-  // include[]=term helps ensure term info comes back
+  // include[]=term helps ensure semester info comes back
   const base =
     `${location.origin}/api/v1/courses?enrollment_state=active&per_page=100&include[]=term`;
   const all = await fetchAllCanvas(base);
@@ -90,90 +138,108 @@ async function fetchMyCoursesFiltered(termFilter) {
   }));
   return mapped.filter((c) => isTermMatch(c, termFilter));
 }
-// For searching and seding to one person (testing)
-// -------- recipient search (by name within current course) --------
-async function searchOneRecipient(courseId, fullName) {
-  const url = new URL(`${location.origin}/api/v1/search/recipients`);
-  url.searchParams.set("search", fullName.trim());
-  url.searchParams.set("context", `course_${courseId}`);
-  url.searchParams.append("types[]", "user");
-  url.searchParams.set("per_page", "20");
 
-  const res = await fetch(url.toString(), { credentials: "include" });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`search/recipients ${res.status}: ${txt.slice(0, 300)}`);
+// ======== Send link to everyone ==========
+
+// Small paginator for Canvas REST (follows Link headers)
+async function canvasGETAll(url, timeoutMs = 30000) {
+  const out = [];
+  let next = url;
+
+  while (next) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(next, { credentials: "include", signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`GET ${next} -> ${res.status} ${txt.slice(0, 200)}`);
+    }
+    const page = await res.json();
+    out.push(...page);
+
+    const link = res.headers.get("Link") || res.headers.get("link");
+    const m = link && link.match(/<([^>]+)>;\s*rel="next"/);
+    next = m ? m[1] : null;
   }
-  const raw = await res.json();
-
-  const users = raw
-    .map((r) => ({
-      id: Number.isInteger(r?.id)
-        ? r.id
-        : (Number.isInteger(r?.user_id) ? r.user_id : null),
-      name: r?.full_name || r?.name || "",
-      common_courses: r?.common_courses || {},
-    }))
-    .filter((u) => Number.isInteger(u.id) && u.name);
-
-  if (users.length === 0) return { chosen: null, candidates: [] };
-  if (users.length === 1) return { chosen: users[0], candidates: users };
-
-  const t = fullName.trim().toLowerCase();
-  const exactByName = users.filter((u) => u.name.toLowerCase() === t);
-  if (exactByName.length === 1) {
-    return { chosen: exactByName[0], candidates: users };
-  }
-
-  return { chosen: null, candidates: users.slice(0, 10) };
+  return out;
+}
+// Course users (students, active only) -> unique user IDs
+async function fetchStudentUserIdsForCourse(courseId) {
+  const base = `${location.origin}/api/v1/courses/${courseId}/users` +
+    `?enrollment_type[]=student&enrollment_state[]=active&per_page=100`;
+  const rows = await canvasGETAll(base);
+  // rows are Users; ensure 'id' exists, dedupe
+  return Array.from(new Set(rows.map((u) => u.id).filter(Boolean)));
 }
 
-// -------- send (FormData + recipients[] + shared context_code; uses sniffed CSRF) --------
-async function sendOneWithSession({ userId, subject, body, contextCode }) {
-  if (!body?.trim()) throw new Error("Message body is required");
-
-  let csrf = await getLatestCsrfFromBackground();
-  if (!csrf) {
-    throw new Error(
-      "CSRF not captured yet. Send one message in Canvas Inbox UI, or navigate around to let the token get captured.",
-    );
-  }
-
+// Send 1 chunk (≤100) as **individual messages** (not a group thread)
+async function sendConversationChunk(
+  { courseId, recipientIds, subject, body, csrfToken },
+) {
   const fd = new FormData();
-  fd.append("recipients[]", String(userId));
+  for (const id of recipientIds) fd.append("recipients[]", String(id));
   if (subject) fd.append("subject", subject);
   fd.append("body", body);
-  fd.append("group_conversation", "false");
-  fd.append("bulk_message", "false");
-  if (contextCode) fd.append("context_code", contextCode);
+  fd.append("context_code", `course_${courseId}`);
+  fd.append("group_conversation", "false"); // send individually
+  fd.append("bulk_message", "true"); // create separate private messages
 
-  const url = `${location.origin}/api/v1/conversations`;
-
-  let res = await fetch(url, {
+  const res = await fetch(`${location.origin}/api/v1/conversations`, {
     method: "POST",
     credentials: "include",
-    headers: { "Accept": "application/json", "X-CSRF-Token": csrf },
+    headers: { "X-CSRF-Token": csrfToken }, // from your background CSRF cache
     body: fd,
   });
 
-  if (res.status === 422) {
-    const fresh = await getLatestCsrfFromBackground();
-    if (fresh && fresh !== csrf) {
-      csrf = fresh;
-      res = await fetch(url, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Accept": "application/json", "X-CSRF-Token": csrf },
-        body: fd,
-      });
-    }
-  }
-
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`POST /conversations ${res.status} — ${txt.slice(0, 800)}`);
+    throw new Error(`POST /conversations ${res.status}: ${txt.slice(0, 300)}`);
   }
-  return true;
+  return res.json(); // Canvas returns an array; when async mode it's empty
+}
+
+// Chunk an array into arrays of size n
+function chunk(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+// Main: send to ALL students in a course (chunked ≤100)
+async function sendLinkToCourseStudents(
+  { courseId, subject, body, csrfToken },
+  progressCb,
+) {
+  // 1) Resolve recipients
+  progressCb?.(`Fetching course students…`);
+  const ids = await fetchStudentUserIdsForCourse(courseId);
+
+  if (!ids.length) return { totalRecipients: 0, chunks: 0, results: [] };
+
+  // 2) Chunk & send
+  const batches = chunk(ids, 100);
+  const results = [];
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    progressCb?.(
+      `Sending chunk ${i + 1}/${batches.length} (${batch.length} recipients)…`,
+    );
+    await postConversation({
+      courseId,
+      recipientIds: batch,
+      subject,
+      body,
+      csrfToken,
+    });
+    results.push({ chunk: i + 1, size: batch.length });
+    await new Promise((r) => setTimeout(r, 300)); // small spacing
+  }
+  return { totalRecipients: ids.length, chunks: batches.length, results };
 }
 
 // -------- router --------
@@ -206,47 +272,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
 
-      if (msg.type === "SEND_ONE_VIA_CANVAS") {
-        const currentCourseId = getCourseIdFromPath();
-        const { recipientTerm, subject, body } = msg;
-
-        const { chosen, candidates } = await searchOneRecipient(
-          currentCourseId,
-          recipientTerm,
+      if (msg.type === "SEND_LINK_TO_COURSE") {
+        const { courseId, subject, body, csrfToken } = msg;
+        const out = await sendLinkToCourseStudents(
+          { courseId, subject, body, csrfToken },
+          (note) =>
+            chrome.runtime.sendMessage({
+              type: "SEND_PROGRESS",
+              courseId,
+              note,
+            }), // optional live progress to popup
         );
-        if (!chosen) {
-          sendResponse({
-            ok: false,
-            error: candidates?.length
-              ? "Ambiguous name; refine it."
-              : "No matching user found.",
-            candidates: candidates || [],
-          });
-          return;
-        }
-
-        const shared = Object.keys(chosen.common_courses || {}); // e.g., ["500008"]
-        const contextCode = shared.length
-          ? `course_${
-            shared.includes(String(currentCourseId))
-              ? currentCourseId
-              : shared[0]
-          }`
-          : null;
-
-        await sendOneWithSession({
-          userId: chosen.id,
-          subject,
-          body,
-          contextCode,
-        });
-        sendResponse({ ok: true, userId: chosen.id });
+        sendResponse({ ok: true, ...out });
         return;
       }
 
-      sendResponse({ ok: false, error: "Unknown message type." });
+      if (msg.type === "SEND_LINK_TO_SECTIONS") {
+        const { courseId, sectionIds, subject, body, csrfToken } = msg;
+
+        const results = [];
+        for (let i = 0; i < sectionIds.length; i++) {
+          const sid = sectionIds[i];
+          const r = await sendLinkToOneTarget({
+            courseId,
+            sectionId: sid,
+            subject,
+            body,
+            csrfToken,
+          });
+          results.push({ sectionId: sid, ...r });
+        }
+        sendResponse({ ok: true, results });
+        return;
+      }
+
+      // ... your other handlers ...
     } catch (e) {
-      console.error(e);
+      console.error("content.js error", e);
       sendResponse({ ok: false, error: String(e) });
     }
   })();
