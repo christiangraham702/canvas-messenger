@@ -2,7 +2,7 @@
 <html>
 
 <head>
-
+  <meta charset="utf-8" />
   <title>CourseLynx Messenger</title>
   <style>
     :root {
@@ -47,51 +47,36 @@
       color: var(--royal-blue);
     }
 
-    label {
-      display: block;
-      margin: 8px 0 4px;
-      font-weight: 600;
-      font-size: 0.9rem;
+    p {
+      margin: 6px 0 0;
+      color: var(--text-gray);
     }
 
-    input,
-    textarea {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      font-size: 0.9rem;
-      margin-bottom: 8px;
-    }
-
-    textarea {
-      height: 90px;
-      resize: vertical;
-    }
-
-    button {
+    .btn {
       background: var(--royal-blue);
       color: var(--white);
       border: none;
-      border-radius: 6px;
-      padding: 10px;
+      border-radius: 8px;
+      padding: 10px 12px;
       font-size: 0.95rem;
-      font-weight: 600;
+      font-weight: 700;
       cursor: pointer;
-      transition: background 0.2s;
-      margin-top: 6px;
       width: 100%;
+      transition: background .2s;
     }
 
-    button:hover {
+    .btn:hover {
       background: var(--royal-blue-dark);
     }
 
-    .row {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
+    .muted {
+      color: var(--text-gray);
+      font-size: 0.85rem;
+    }
+
+    .small {
+      font-size: 0.8rem;
+      color: var(--text-gray);
     }
 
     .status {
@@ -111,36 +96,33 @@
     }
 
     li {
-      margin: 2px 0;
-      font-size: 0.9rem;
+      margin: 6px 0;
+      font-size: 0.93rem;
     }
 
-    code {
-      background: var(--light-gray);
-      padding: 1px 4px;
-      border-radius: 4px;
-      font-size: 0.85rem;
+    /* Intro “card” */
+    .hero {
+      background: linear-gradient(180deg, #0052cc 0%, #003d99 100%);
+      color: #fff;
+      border-radius: 12px;
+      padding: 14px;
     }
 
-    .small {
-      font-size: 0.8rem;
-      color: var(--text-gray);
+    .hero h2 {
+      margin: 0 0 6px;
+      font-size: 1.05rem;
     }
 
-    .toolbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 6px;
+    .hero p {
+      margin: 0;
+      color: #e8eeff;
     }
 
-    .toolbar button {
-      width: auto;
-      padding: 4px 8px;
-      font-size: 0.7rem;
+    .hero .cta {
+      margin-top: 12px;
     }
 
-    /* 👇 New smaller style for CSRF section */
+    /* Tiny dev panel for CSRF */
     .csrf-panel {
       font-size: 0.75rem;
       color: var(--text-gray);
@@ -149,25 +131,46 @@
       padding: 8px;
     }
 
-    .csrf-panel strong {
-      font-size: 0.8rem;
-      color: #333;
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
     }
 
-    .csrf-panel button {
+    .toolbar button {
       background: none;
       border: none;
       color: var(--royal-blue);
       font-size: 0.7rem;
-      font-weight: 600;
+      font-weight: 700;
       padding: 0;
-      margin-left: auto;
       cursor: pointer;
     }
 
-    .csrf-panel .status {
-      font-size: 0.7rem;
-      margin: 4px 0 0;
+    /* Hide/show sections */
+    .hidden {
+      display: none;
+    }
+
+    .row-right {
+      min-width: 150px;
+      text-align: right;
+    }
+
+    .btn-secondary {
+      background: #eaf0ff;
+      color: var(--royal-blue);
+      border: 1px solid #d4e1ff;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .btn-secondary:disabled {
+      opacity: .6;
+      cursor: not-allowed;
     }
   </style>
 </head>
@@ -177,26 +180,34 @@
     <h3>CourseLynx Messenger</h3>
   </header>
 
-  <!-- CSRF panel (subtle) -->
-  <section>
-    <div class="csrf-panel">
-      <div class="toolbar">
-        <strong>CSRF Token (dev info)</strong>
-        <button id="refreshCsrf">Refresh</button>
+  <!-- Intro / Welcome -->
+  <section id="introSection">
+    <div class="hero">
+      <h2>Welcome!</h2>
+      <p>Share your CourseLynx group chat link with classmates—fast. We’ll find your courses for the current term and
+        only let you send where it hasn’t been sent yet.</p>
+      <div class="cta">
+        <button id="introFindBtn" class="btn">Find my courses (Fall 2025)</button>
       </div>
-      <div id="csrfStatus" class="status">loading…</div>
-      <button id="clearCsrf" style="margin-top:4px;">Clear</button>
     </div>
+    <p class="muted" style="margin-top:10px;">
+      Tip: Have Canvas open in a tab (e.g., a course page). We’ll use your session to fetch courses.
+    </p>
   </section>
 
-  <section>
-    <h4>My Courses</h4>
-    <label for="termFilter">Only show courses in this term</label>
-    <input id="termFilter" value="Spring 2023" />
-    <button id="fetchBtn">Fetch Courses</button>
+  <!-- Courses list (revealed after user clicks) -->
+  <section id="coursesSection" class="hidden">
+    <h4>My Courses — Fall 2025</h4>
+    <p class="small">We’ll check availability and enable “Send Link” only if your course still has unsent section(s).
+    </p>
+    <div class="row" style="display:flex; gap:8px; align-items:center; margin:8px 0;">
+      <input id="termFilter" value="Fall 2025" style="flex:1; padding:8px; border:1px solid #ccc; border-radius:6px;" />
+      <button id="fetchBtn" class="btn-secondary">Refresh</button>
+    </div>
     <div id="status" class="status"></div>
     <div id="results"></div>
   </section>
+
 
   <script type="module" src="popup.js"></script>
 </body>

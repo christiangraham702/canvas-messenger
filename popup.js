@@ -20,6 +20,14 @@ function toTermKey(label) {
     .replace(/^-+|-+$/g, "");
 }
 
+function normalizeCourseCode(code) {
+  return (code || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_") // spaces → underscores
+    .replace(/[^a-z0-9_]/g, ""); // strip anything else
+}
+
 function getTermLabel(c) {
   return c?.enrollment_term?.name || c?.term?.name || "";
 }
@@ -107,6 +115,29 @@ document.getElementById("clearCsrf")?.addEventListener("click", async () => {
 });
 document.addEventListener("DOMContentLoaded", refreshCsrfStatus);
 
+const introSection = document.getElementById("introSection");
+const coursesSection = document.getElementById("coursesSection");
+const introFindBtn = document.getElementById("introFindBtn");
+const termFilterEl = document.getElementById("termFilter");
+const fetchBtn = document.getElementById("fetchBtn");
+
+// Default the term
+document.addEventListener("DOMContentLoaded", () => {
+  if (termFilterEl && !termFilterEl.value) termFilterEl.value = "Fall 2025";
+});
+
+// When user clicks the intro CTA:
+// 1) reveal the courses section
+// 2) ensure the term is Fall 2025
+// 3) trigger the same flow as clicking your existing "Fetch Courses" button
+introFindBtn?.addEventListener("click", () => {
+  if (termFilterEl) termFilterEl.value = "Fall 2025";
+  introSection.classList.add("hidden");
+  coursesSection.classList.remove("hidden");
+  // Trigger your existing fetch flow
+  fetchBtn?.click();
+});
+
 // ========= send to everyone =============
 async function collectRemainingSectionIds(tab, course) {
   const resp = await chrome.tabs.sendMessage(tab.id, {
@@ -143,9 +174,11 @@ async function handleSendLinkForCourse(course, statusEl) {
   const host = new URL(tab.url).host;
   const termLabel = getTermLabel(course);
   const termKey = toTermKey(termLabel);
-  const linkUrl = `https://courselynx.app/c/${host}/${course.id}/${termKey}`;
+  const linkUrl = `https://app.courselynx.com/join/${host.split(".")[0]}/${
+    normalizeCourseCode(course.course_code)
+  }/`;
   const subject = "test";
-  const body = "test";
+  const body = "last test";
 
   statusEl.textContent = "Checking remaining sections…";
   const { sectionIds, canvasHost } = await collectRemainingSectionIds(
