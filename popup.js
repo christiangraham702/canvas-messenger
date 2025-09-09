@@ -60,9 +60,11 @@ function normalizeCourseCode(code) {
   return (code || "")
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "");
+    .replace(/\s+/g, "_") // replace spaces with underscore
+    .replace(/[^a-z0-9_]/g, "") // strip unwanted chars
+    .replace(/([a-z])([0-9])/g, "$1_$2"); // insert underscore between letter and number
 }
+
 function extractSchool(host) {
   if (!host) return "";
   if (host.endsWith(".instructure.com")) {
@@ -310,7 +312,7 @@ function renderCourses(courses) {
    ========================= */
 document.addEventListener("DOMContentLoaded", () => {
   coursesSection.classList.remove("hidden");
-  fetchAndRenderCoursesForTerm("Ongoing Term");
+  fetchAndRenderCoursesForTerm("Spring 2024");
 });
 /* =========================
    Collect remaining sections for a course
