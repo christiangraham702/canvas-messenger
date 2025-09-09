@@ -26,8 +26,8 @@
     }
 
     header {
-      background: var(--royal-blue);
-      color: var(--white);
+      background: var(--white);
+      color: var(--royal-blue);
       padding: 14px 16px;
     }
 
@@ -59,7 +59,7 @@
       border-radius: 8px;
       padding: 10px 12px;
       font-size: 0.95rem;
-      font-weight: 700;
+      font-weight: 500;
       cursor: pointer;
       width: 100%;
       transition: background .2s;
@@ -175,7 +175,7 @@
 
     /* Panel polish */
     .panel-title {
-      color: #fff;
+      color: var(--royal-blue);
       font-weight: 800;
       margin: 0;
     }
@@ -183,7 +183,7 @@
     .section-label {
       color: #e8eeff;
       font-weight: 700;
-      margin: 10px 0 6px;
+      margin: 5px 0 6px;
     }
 
     /* Course list */
@@ -261,8 +261,8 @@
     }
 
     .btn-pill {
-      border-radius: 999px;
-      padding: 10px 14px;
+      border-radius: 10px;
+      padding: 8px 10px;
     }
 
     .btn-ghost {
@@ -273,6 +273,25 @@
 
     .btn-ghost:hover {
       filter: brightness(.96);
+    }
+
+    .preview-textarea {
+      width: 100%;
+      box-sizing: border-box;
+      /* never overflow width */
+      font-size: 0.7rem;
+      min-height: 110px;
+      max-height: 150px;
+      /* prevents the popup from growing too tall */
+      resize: vertical;
+      /* user can expand if needed */
+      line-height: 1.35;
+
+      /* show newlines and wrap long URLs/text */
+      white-space: pre-wrap;
+      /* respects \n */
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }
 
     /* Progress bar (if you added it) */
@@ -317,20 +336,17 @@
 
   <!-- Courses list (revealed after user clicks) -->
   <section id="coursesSection" class="hidden">
-    <h4>My Courses — Fall 2025</h4>
-    <p class="small">We’ll check availability and enable “Send Link” only if your course still has unsent section(s).
-    </p>
-
     <!-- The rendered course cards go here -->
     <div id="results"></div>
 
     <!-- (Your message template select stays where you placed it) -->
     <!-- Example preview area, keep your existing one if you already have it -->
-    <input id="previewBody" class="preview-input" readonly
-      placeholder="Preview of the message body will appear here…" />
+    <h4 style="margin: 10px 5px;">Message Preview</h4>
+    <textarea id="previewBody" class="textarea preview-textarea" rows="4"
+      placeholder="Preview of the message body will appear here…"></textarea>
 
     <div style="display:flex; gap:10px; margin-top:10px;">
-      <button id="randomizeBtn" class="btn-ghost btn-pill" style="flex:0 0 auto;">🔄 Randomize</button>
+      <button id="randomizeBtn" class="btn-ghost btn-pill" style="flex:0 0 auto;">🔄 Random</button>
       <button id="sendSelectedBtn" class="btn btn-pill" style="flex:1;">Send link to selected</button>
     </div>
 
