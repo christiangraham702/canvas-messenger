@@ -1,30 +1,104 @@
+// ========= content.js =========
+
+// -------- Retry / keep-alive helpers --------
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function shouldRetry(err) {
+  const s = err?.status;
+  if (err?.name === "AbortError") return true; // timeout -> retry
+  if (s == null) return true; // network error
+  if ([429, 500, 502, 503, 504].includes(s)) return true; // rate/5xx
+  return false;
+}
+
+async function withRetries(
+  fn,
+  { retries = 2, baseDelay = 800, factor = 2, jitter = 0.25 } = {},
+) {
+  let attempt = 0, lastErr;
+  while (attempt <= retries) {
+    try {
+      return await fn(attempt);
+    } catch (e) {
+      lastErr = e;
+      if (!shouldRetry(e) || attempt === retries) break;
+      attempt++;
+      const delay = Math.round(
+        baseDelay * Math.pow(factor, attempt - 1) *
+          (1 + (Math.random() * 2 - 1) * jitter),
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
+async function fetchWithRetry(
+  url,
+  { timeoutMs = 45000, retries = 2, ...options } = {},
+) {
+  return withRetries(async () => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: ctrl.signal });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        const err = new Error(
+          `HTTP ${res.status} ${url} — ${txt.slice(0, 200)}`,
+        );
+        err.status = res.status;
+        throw err;
+      }
+      return res;
+    } finally {
+      clearTimeout(t);
+    }
+  }, { retries });
+}
+
+// Keep both the page and the extension service worker awake during long runs
+let _keepAliveTimer = null;
+function startKeepAlive() {
+  if (_keepAliveTimer) return;
+  _keepAliveTimer = setInterval(async () => {
+    try {
+      chrome.runtime.sendMessage({ type: "PING" }, () => {});
+    } catch {}
+    try {
+      // cheap HEAD to a tiny endpoint; adjust if your school blocks HEAD
+      await fetch(`${location.origin}/api/v1/users/self`, {
+        method: "HEAD",
+        credentials: "include",
+        cache: "no-store",
+      });
+    } catch {}
+  }, 20000);
+}
+startKeepAlive();
+
 // -------- utils --------
 
 // get all sections for a course
 async function fetchSections(courseId) {
   const url =
     `${location.origin}/api/v1/courses/${courseId}/sections?per_page=100`;
-  const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`sections ${res.status} — ${txt.slice(0, 200)}`);
-  }
+  const res = await fetchWithRetry(url, { credentials: "include" });
   const data = await res.json();
   return data.map((s) => ({ id: s.id, name: s.name || `Section ${s.id}` }));
 }
 
 async function fetchAllCanvas(url, acc = []) {
-  const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Canvas API error ${res.status} — ${txt.slice(0, 200)}`);
-  }
+  const res = await fetchWithRetry(url, { credentials: "include" });
   const data = await res.json();
   acc.push(...data);
   const link = res.headers.get("Link") || "";
   const next = link.match(/<([^>]+)>;\s*rel="next"/);
   return next ? fetchAllCanvas(next[1], acc) : acc;
 }
+
 // Ask background for freshest CSRF
 async function getLatestCsrfFromBackground() {
   return new Promise((resolve) => {
@@ -46,47 +120,46 @@ async function postConversation(
   fd.append("group_conversation", "false"); // send individually
   fd.append("bulk_message", "true"); // separate DMs per recipient
 
-  async function doPost(csrf) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(`${location.origin}/api/v1/conversations`, {
+  const doPost = async (csrf) => {
+    const res = await fetchWithRetry(
+      `${location.origin}/api/v1/conversations`,
+      {
         method: "POST",
         credentials: "include",
         headers: { "X-CSRF-Token": csrf },
         body: fd,
-        signal: ctrl.signal,
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        const err = new Error(
-          `POST /conversations ${res.status}: ${txt.slice(0, 500)}`,
-        );
-        err.status = res.status;
-        throw err;
-      }
-      return res.json();
-    } finally {
-      clearTimeout(t);
-    }
-  }
+        timeoutMs,
+        retries: 0, // we handle logic below so we can swap CSRF if needed
+      },
+    );
+    return res.json();
+  };
 
-  try {
-    return await doPost(csrfToken);
-  } catch (e) {
-    if (e?.status === 422) {
-      // get freshest CSRF from background once
-      const fresh = await new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          { type: "GET_LATEST_CSRF" },
-          (resp) => resolve(resp?.csrf || null),
-        );
-      });
-      if (fresh && fresh !== csrfToken) return await doPost(fresh);
+  // Try with the provided token, then refresh CSRF once if 422, plus 2 general retries for 429/5xx/timeouts.
+  let attempt = 0;
+  let lastErr;
+
+  while (attempt < 3) {
+    try {
+      if (attempt === 0) return await doPost(csrfToken);
+      if (attempt === 1) {
+        // 2nd attempt: try with latest CSRF
+        const fresh = await getLatestCsrfFromBackground();
+        return await doPost(fresh || csrfToken);
+      }
+      // 3rd attempt: backoff + try again with whatever latest token we have
+      const fresh = await getLatestCsrfFromBackground();
+      return await doPost(fresh || csrfToken);
+    } catch (e) {
+      lastErr = e;
+      if (!shouldRetry(e) && e?.status !== 422) break;
+      await sleep(600 * Math.pow(2, attempt)); // 600ms, 1200ms
+      attempt++;
     }
-    throw e;
   }
+  throw lastErr;
 }
+
 // Normalize term labels for fuzzy matching
 function norm(s) {
   return (s || "")
@@ -95,6 +168,7 @@ function norm(s) {
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
+
 // to make sure correct semester
 function isTermMatch(course, wantedLabel) {
   const w = norm(wantedLabel);
@@ -102,20 +176,14 @@ function isTermMatch(course, wantedLabel) {
     course?.enrollment_term?.name || course?.term?.name || "",
   );
   const courseName = norm(course?.name || "");
-  if (!w) return true; // no filter => everything
-  // direct includes in term name or course name
+  if (!w) return true;
   if (termName.includes(w)) return true;
   if (courseName.includes(w)) return true;
-  // handle common alt orders like "2023 spring"
   if (w === "spring 2023") {
-    if (
-      termName.includes("2023 spring") || courseName.includes("2023 spring")
-    ) return true;
-    // as a fallback, use dates if present (Jan–Jun 2023)
     const start = course.start_at ? new Date(course.start_at) : null;
     const end = course.end_at ? new Date(course.end_at) : null;
     if (start && start.getFullYear() === 2023 && start.getMonth() <= 5) {
-      return true; // Jan(0)–Jun(5)
+      return true;
     }
     if (end && end.getFullYear() === 2023 && end.getMonth() <= 6) return true;
   }
@@ -123,7 +191,6 @@ function isTermMatch(course, wantedLabel) {
 }
 
 async function fetchMyCoursesFiltered(termFilter) {
-  // include[]=term helps ensure semester info comes back
   const base =
     `${location.origin}/api/v1/courses?enrollment_state=active&per_page=100&include[]=term`;
   const all = await fetchAllCanvas(base);
@@ -131,8 +198,8 @@ async function fetchMyCoursesFiltered(termFilter) {
     id: c.id,
     name: c.name,
     course_code: c.course_code,
-    term: c.term, // sometimes present
-    enrollment_term: c.enrollment_term, // sometimes present
+    term: c.term,
+    enrollment_term: c.enrollment_term,
     start_at: c.start_at,
     end_at: c.end_at,
   }));
@@ -147,18 +214,10 @@ async function canvasGETAll(url, timeoutMs = 30000) {
   let next = url;
 
   while (next) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    let res;
-    try {
-      res = await fetch(next, { credentials: "include", signal: ctrl.signal });
-    } finally {
-      clearTimeout(t);
-    }
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`GET ${next} -> ${res.status} ${txt.slice(0, 200)}`);
-    }
+    const res = await fetchWithRetry(next, {
+      credentials: "include",
+      timeoutMs,
+    });
     const page = await res.json();
     out.push(...page);
 
@@ -168,39 +227,24 @@ async function canvasGETAll(url, timeoutMs = 30000) {
   }
   return out;
 }
+
 // Course users (students, active only) -> unique user IDs
 async function fetchStudentUserIdsForCourse(courseId) {
   const base = `${location.origin}/api/v1/courses/${courseId}/users` +
     `?enrollment_type[]=student&enrollment_state[]=active&per_page=100`;
-  const rows = await canvasGETAll(base);
-  // rows are Users; ensure 'id' exists, dedupe
-  return Array.from(new Set(rows.map((u) => u.id).filter(Boolean)));
+
+  // Extra robustness: wrap the whole pagination in retries
+  return withRetries(async () => {
+    const rows = await canvasGETAll(base);
+    return Array.from(new Set(rows.map((u) => u.id).filter(Boolean)));
+  }, { retries: 2, baseDelay: 800 });
 }
 
 // Send 1 chunk (≤100) as **individual messages** (not a group thread)
 async function sendConversationChunk(
   { courseId, recipientIds, subject, body, csrfToken },
 ) {
-  const fd = new FormData();
-  for (const id of recipientIds) fd.append("recipients[]", String(id));
-  if (subject) fd.append("subject", subject);
-  fd.append("body", body);
-  fd.append("context_code", `course_${courseId}`);
-  fd.append("group_conversation", "false"); // send individually
-  fd.append("bulk_message", "true"); // create separate private messages
-
-  const res = await fetch(`${location.origin}/api/v1/conversations`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "X-CSRF-Token": csrfToken }, // from your background CSRF cache
-    body: fd,
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`POST /conversations ${res.status}: ${txt.slice(0, 300)}`);
-  }
-  return res.json(); // Canvas returns an array; when async mode it's empty
+  return postConversation({ courseId, recipientIds, subject, body, csrfToken });
 }
 
 // Chunk an array into arrays of size n
@@ -221,7 +265,7 @@ async function sendLinkToCourseStudents(
 
   if (!ids.length) return { totalRecipients: 0, chunks: 0, results: [] };
 
-  // 2) Chunk & send
+  // 2) Chunk & send with retries per chunk
   const batches = chunk(ids, 100);
   const results = [];
   for (let i = 0; i < batches.length; i++) {
@@ -229,15 +273,22 @@ async function sendLinkToCourseStudents(
     progressCb?.(
       `Sending chunk ${i + 1}/${batches.length} (${batch.length} recipients)…`,
     );
-    await postConversation({
-      courseId,
-      recipientIds: batch,
-      subject,
-      body,
-      csrfToken,
-    });
+
+    // Try up to 3 attempts per chunk (postConversation already has CSRF refresh + inner retries)
+    await withRetries(
+      () =>
+        sendConversationChunk({
+          courseId,
+          recipientIds: batch,
+          subject,
+          body,
+          csrfToken,
+        }),
+      { retries: 2, baseDelay: 800 },
+    );
+
     results.push({ chunk: i + 1, size: batch.length });
-    await new Promise((r) => setTimeout(r, 300)); // small spacing
+    await sleep(300); // small spacing
   }
   return { totalRecipients: ids.length, chunks: batches.length, results };
 }
@@ -258,9 +309,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true, courses });
         return;
       }
+      if (msg?.type === "PING") {
+        sendResponse({ ok: true });
+        return; // no async work
+      }
 
       if (msg.type === "FETCH_COURSES") {
-        // kept for backwards compatibility (no filter)
         const courses = await fetchMyCoursesFiltered("");
         sendResponse({ ok: true, courses });
         return;
@@ -281,7 +335,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               type: "SEND_PROGRESS",
               courseId,
               note,
-            }), // optional live progress to popup
+            }),
         );
         sendResponse({ ok: true, ...out });
         return;
@@ -289,24 +343,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg.type === "SEND_LINK_TO_SECTIONS") {
         const { courseId, sectionIds, subject, body, csrfToken } = msg;
-
         const results = [];
         for (let i = 0; i < sectionIds.length; i++) {
           const sid = sectionIds[i];
-          const r = await sendLinkToOneTarget({
-            courseId,
-            sectionId: sid,
-            subject,
-            body,
-            csrfToken,
-          });
-          results.push({ sectionId: sid, ...r });
+          // (If you still use per-section sends; not used in the current flow)
+          const one = await sendLinkToCourseStudents(
+            { courseId, subject, body, csrfToken },
+            (note) =>
+              chrome.runtime.sendMessage({
+                type: "SEND_PROGRESS",
+                courseId,
+                sectionId: sid,
+                note,
+              }),
+          );
+          results.push({ sectionId: sid, ...one });
         }
         sendResponse({ ok: true, results });
         return;
       }
-
-      // ... your other handlers ...
     } catch (e) {
       console.error("content.js error", e);
       sendResponse({ ok: false, error: String(e) });

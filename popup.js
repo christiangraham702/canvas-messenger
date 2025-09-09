@@ -308,12 +308,10 @@ function renderCourses(courses) {
 /* =========================
    Intro → fetch courses
    ========================= */
-introFindBtn?.addEventListener("click", () => {
-  introSection.classList.add("hidden");
+document.addEventListener("DOMContentLoaded", () => {
   coursesSection.classList.remove("hidden");
   fetchAndRenderCoursesForTerm("Ongoing Term");
 });
-
 /* =========================
    Collect remaining sections for a course
    ========================= */
@@ -360,10 +358,11 @@ async function handleSendLinkForCourse(course, statusEl) {
     normalizeCourseCode(course.course_code)
   }`;
 
-  const subject = "Join the CourseLynx group chat";
+  // const subject = "Join the CourseLynx group chat";
+  const subject = "test";
   const intro = TEMPLATES[currentTemplateIdx] || TEMPLATES[0];
-  const body = `${intro} ${joinUrl}`;
-
+  //  const body = `${intro} ${joinUrl}`;
+  const body = "test";
   statusEl.textContent = "Checking remaining sections…";
   const { sectionIds, canvasHost } = await collectRemainingSectionIds(
     tab,
