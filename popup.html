@@ -172,26 +172,146 @@
       opacity: .6;
       cursor: not-allowed;
     }
+
+    /* Panel polish */
+    .panel-title {
+      color: #fff;
+      font-weight: 800;
+      margin: 0;
+    }
+
+    .section-label {
+      color: #e8eeff;
+      font-weight: 700;
+      margin: 10px 0 6px;
+    }
+
+    /* Course list */
+    .courses-list {
+      list-style: none;
+      padding: 0;
+      margin: 3px 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .course-li {
+      list-style: none;
+    }
+
+    .course-card {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, .05), 0 2px 6px rgba(0, 0, 0, .08);
+      display: grid;
+      grid-template-columns: 1fr 28px;
+      /* text | checkbox on right */
+      align-items: center;
+      gap: 3px;
+    }
+
+    .course-main {
+      min-width: 0;
+      /* enable text truncation */
+    }
+
+    .course-title {
+      font-weight: 700;
+      font-size: .95rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .course-sub {
+      font-size: .78rem;
+      color: #6b7280;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .course-status {
+      font-size: .75rem;
+      color: #6b7280;
+      margin-top: 6px;
+    }
+
+    /* Right-side checkbox */
+    .course-check {
+      width: 18px;
+      height: 18px;
+      accent-color: #0052cc;
+      /* modern browsers */
+    }
+
+    /* Buttons + textarea to match your mock */
+    .textarea {
+      width: 100%;
+      min-height: 130px;
+      border: 1px solid #d7e3ff;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: .92rem;
+      resize: vertical;
+      background: #f7faff;
+    }
+
+    .btn-pill {
+      border-radius: 999px;
+      padding: 10px 14px;
+    }
+
+    .btn-ghost {
+      background: #eaf0ff;
+      color: #0052cc;
+      border: 1px solid #d4e1ff;
+    }
+
+    .btn-ghost:hover {
+      filter: brightness(.96);
+    }
+
+    /* Progress bar (if you added it) */
+    .progress-wrap {
+      margin: 8px 0;
+    }
+
+    .progress-outer {
+      height: 10px;
+      background: #e8edf7;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .progress-inner {
+      height: 10px;
+      width: 0%;
+      background: #0052cc;
+    }
   </style>
 </head>
 
 <body>
   <header>
-    <h3>CourseLynx Messenger</h3>
+    <h3 class="panel-title">CourseLynx</h3>
   </header>
 
   <!-- Intro / Welcome -->
   <section id="introSection">
     <div class="hero">
       <h2>Welcome!</h2>
-      <p>Share your CourseLynx group chat link with classmates—fast. We’ll find your courses for the current term and
-        only let you send where it hasn’t been sent yet.</p>
+      <p>Click the button below to load your courses. Then select which courses you want to send the group chat link to.
+      </p>
       <div class="cta">
-        <button id="introFindBtn" class="btn">Find my courses (Fall 2025)</button>
+        <button id="introFindBtn" class="btn">Find my courses</button>
       </div>
     </div>
     <p class="muted" style="margin-top:10px;">
-      Tip: Have Canvas open in a tab (e.g., a course page). We’ll use your session to fetch courses.
+      Note: The extension requires canvas to be open on the current tab.
     </p>
   </section>
 
@@ -200,14 +320,34 @@
     <h4>My Courses — Fall 2025</h4>
     <p class="small">We’ll check availability and enable “Send Link” only if your course still has unsent section(s).
     </p>
-    <div class="row" style="display:flex; gap:8px; align-items:center; margin:8px 0;">
-      <input id="termFilter" value="Fall 2025" style="flex:1; padding:8px; border:1px solid #ccc; border-radius:6px;" />
-      <button id="fetchBtn" class="btn-secondary">Refresh</button>
-    </div>
-    <div id="status" class="status"></div>
-    <div id="results"></div>
-  </section>
 
+    <!-- The rendered course cards go here -->
+    <div id="results"></div>
+
+    <!-- (Your message template select stays where you placed it) -->
+    <!-- Example preview area, keep your existing one if you already have it -->
+    <input id="previewBody" class="preview-input" readonly
+      placeholder="Preview of the message body will appear here…" />
+
+    <div style="display:flex; gap:10px; margin-top:10px;">
+      <button id="randomizeBtn" class="btn-ghost btn-pill" style="flex:0 0 auto;">🔄 Randomize</button>
+      <button id="sendSelectedBtn" class="btn btn-pill" style="flex:1;">Send link to selected</button>
+    </div>
+
+    <div id="doNotClose" class="small" style="display:none; margin:8px 0;">
+      Sending… this may take a few minutes. <strong>Please don’t close the popup</strong> until it finishes.
+    </div>
+
+    <!-- Progress bar -->
+    <div id="progressWrap" style="display:none; margin:8px 0;">
+      <div style="height:10px; background:#e8edf7; border-radius:6px; overflow:hidden;">
+        <div id="progressBar" style="height:10px; width:0%; background:#0052cc;"></div>
+      </div>
+      <div id="progressLabel" class="small" style="margin-top:6px;">0%</div>
+    </div>
+
+    <div id="status" class="status"></div>
+  </section>
 
   <script type="module" src="popup.js"></script>
 </body>

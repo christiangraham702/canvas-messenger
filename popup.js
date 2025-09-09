@@ -1,6 +1,66 @@
 // popup.js (module)
 import { claimCourse, getCourseSends, markSent, releaseClaim } from "./db.js";
 
+// --- Message templates (exactly your 14 lines) ---
+const TEMPLATES = [
+  "Hey, I’m sharing the group chat link to the whole class—here it is:",
+  "Hi all, Here’s the group chat for our class:",
+  "Hey everyone, Just sharing the group chat link. Join here:",
+  "Hi guys, This is the group chat link for our class:",
+  "Hey all, Here’s the link to our class group chat:",
+  "Hey, Just passing along the group chat link to the class:",
+  "Hey everyone, Here’s the group chat for our class:",
+  "Hey everyone, This is the link to the class group chat:",
+  "Hi all, Sharing the group chat link for our class:",
+  "Hey, Here’s the chat link for our class:",
+  "Hey, I’m sharing the group chat link with everyone:",
+  "Hi everyone, Here’s the chat link for the class:",
+  "Hey all, This is the class group chat link:",
+  "Hi guys, I found the class chat, here is the link:",
+];
+
+const selectedCourseIds = new Set();
+
+const progressWrap = document.getElementById("progressWrap");
+const progressBar = document.getElementById("progressBar");
+const progressLabel = document.getElementById("progressLabel");
+const sendSelectedBtn = document.getElementById("sendSelectedBtn");
+const doNotCloseEl = document.getElementById("doNotClose");
+
+function setProgress(current, total) {
+  const pct = total ? Math.round((current / total) * 100) : 0;
+  progressBar.style.width = pct + "%";
+  progressLabel.textContent = `${pct}% (${current}/${total})`;
+}
+
+function showProgress(show) {
+  progressWrap.style.display = show ? "block" : "none";
+  doNotCloseEl.style.display = show ? "block" : "none";
+  if (!show) setProgress(0, 0);
+}
+
+// Populate the <select> on load
+const templateSelectEl = document.getElementById("templateSelect");
+document.addEventListener("DOMContentLoaded", () => {
+  if (templateSelectEl && !templateSelectEl.options.length) {
+    TEMPLATES.forEach((t, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = t;
+      templateSelectEl.appendChild(opt);
+    });
+    templateSelectEl.selectedIndex = 0; // default first
+  }
+});
+
+function normalizeCourseCode(code) {
+  return (code || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+}
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
@@ -18,14 +78,6 @@ function toTermKey(label) {
     .replace(/spring\s*'?([0-9]{2})\b/g, "spring 20$1")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-}
-
-function normalizeCourseCode(code) {
-  return (code || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_") // spaces → underscores
-    .replace(/[^a-z0-9_]/g, ""); // strip anything else
 }
 
 function getTermLabel(c) {
@@ -123,19 +175,80 @@ const fetchBtn = document.getElementById("fetchBtn");
 
 // Default the term
 document.addEventListener("DOMContentLoaded", () => {
-  if (termFilterEl && !termFilterEl.value) termFilterEl.value = "Fall 2025";
+  if (termFilterEl && !termFilterEl.value) termFilterEl.value = "Ongoing Term";
 });
 
-// When user clicks the intro CTA:
-// 1) reveal the courses section
-// 2) ensure the term is Fall 2025
-// 3) trigger the same flow as clicking your existing "Fetch Courses" button
+function renderCourses(courses) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+  if (!courses?.length) {
+    results.innerHTML = "<p><em>No courses matched this term.</em></p>";
+    return;
+  }
+
+  const ul = document.createElement("ul");
+  ul.className = "courses-list";
+
+  courses.forEach((c) => {
+    const term = getTermLabel(c) || "—";
+    const li = document.createElement("li");
+    li.className = "course-li";
+
+    li.innerHTML = `
+      <div class="course-card" data-courseid="${c.id}">
+        <div class="course-main">
+          <div class="course-title" title="${c.name || "(unnamed course)"}">
+            ${c.name || "(unnamed course)"}
+          </div>
+          <div class="course-sub">
+            ${c.course_code || "—"} · Term: ${term}
+          </div>
+          <div id="avail-${c.id}" class="course-status">Checking availability…</div>
+        </div>
+        <div style="text-align:right;">
+          <input
+            type="checkbox"
+            class="course-check"
+            id="ck-${c.id}"
+            data-courseid="${c.id}"
+            disabled
+          />
+        </div>
+      </div>
+    `;
+
+    ul.appendChild(li);
+  });
+
+  results.appendChild(ul);
+
+  // Make the whole card toggle the checkbox (except clicking directly on inputs/buttons)
+  results.querySelectorAll(".course-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("input,button,a,select,textarea")) return;
+      const id = Number(card.dataset.courseid);
+      const ck = document.getElementById(`ck-${id}`);
+      if (!ck || ck.disabled) return;
+      ck.checked = !ck.checked;
+      if (ck.checked) selectedCourseIds.add(id);
+      else selectedCourseIds.delete(id);
+    });
+  });
+
+  // Track checkbox selection changes
+  results.querySelectorAll(".course-check").forEach((ck) => {
+    ck.addEventListener("change", () => {
+      const id = Number(ck.dataset.courseid);
+      if (ck.checked) selectedCourseIds.add(id);
+      else selectedCourseIds.delete(id);
+    });
+  });
+}
+
 introFindBtn?.addEventListener("click", () => {
-  if (termFilterEl) termFilterEl.value = "Fall 2025";
   introSection.classList.add("hidden");
   coursesSection.classList.remove("hidden");
-  // Trigger your existing fetch flow
-  fetchBtn?.click();
+  fetchAndRenderCoursesForTerm("Fall 2025");
 });
 
 // ========= send to everyone =============
@@ -176,9 +289,12 @@ async function handleSendLinkForCourse(course, statusEl) {
   const termKey = toTermKey(termLabel);
   const linkUrl = `https://app.courselynx.com/join/${host.split(".")[0]}/${
     normalizeCourseCode(course.course_code)
-  }/`;
-  const subject = "test";
-  const body = "last test";
+  }`;
+  const subject = "Join the CourseLynx group chat";
+  templateIdx = Number(templateSelectEl?.value ?? 0);
+  const intro = TEMPLATES[Number.isFinite(templateIdx) ? templateIdx : 0];
+
+  const body = `${intro}\n${linkUrl}`;
 
   statusEl.textContent = "Checking remaining sections…";
   const { sectionIds, canvasHost } = await collectRemainingSectionIds(
@@ -271,73 +387,23 @@ async function handleSendLinkForCourse(course, statusEl) {
 const lastCourses = []; // cache in popup to attach buttons
 const availabilityByCourseId = new Map();
 
-function renderCourses(courses) {
-  const results = document.getElementById("results");
-  results.innerHTML = "";
-  if (!courses?.length) {
-    results.innerHTML = "<p><em>No courses matched this term.</em></p>";
-    return;
-  }
-
-  const ul = document.createElement("ul");
-
-  courses.forEach((c) => {
-    const term = getTermLabel(c) || "—";
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
-        <div>
-          <div><strong>${c.name || "(unnamed course)"}</strong></div>
-          <div class="small"><code>ID: ${c.id}</code> · Code: ${
-      c.course_code || "—"
-    } · Term: ${term}</div>
-          <div class="small" id="avail-${c.id}" style="margin-top:6px;">Checking availability…</div>
-        </div>
-        <div style="min-width:150px; text-align:right;">
-          <button class="btn-send" data-courseid="${c.id}" disabled>Send Link</button>
-        </div>
-      </div>
-    `;
-    ul.appendChild(li);
-  });
-
-  results.appendChild(ul);
-
-  // Wire "Send" (we'll implement later to actually broadcast)
-  results.querySelectorAll(".btn-send").forEach((btn) => {
-    // in renderCourses, when wiring the .btn-send:
-    btn.addEventListener("click", async () => {
-      const courseId = Number(btn.dataset.courseid);
-      const course = lastCourses.find((c) => c.id === courseId);
-      const statusEl = document.getElementById(`avail-${course.id}`);
-      btn.setAttribute("disabled", "true");
-      try {
-        await handleSendLinkForCourse(course, statusEl);
-      } catch (e) {
-        statusEl.innerHTML = `<span class="error">${String(e)}`;
-        btn.removeAttribute("disabled");
-      }
-    });
-  });
-}
-
-document.getElementById("fetchBtn").addEventListener("click", async () => {
+async function fetchAndRenderCoursesForTerm(termText = "Fall 2025") {
   const status = document.getElementById("status");
-  const termFilter = (document.getElementById("termFilter").value || "").trim();
-  status.textContent = `Requesting courses and filtering by "${
-    termFilter || "—"
-  }"…`;
+  status.textContent = `Requesting courses and filtering by "${termText}"…`;
 
   try {
-    const tab = await getActiveTab();
+    const tab =
+      (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab || !/^https:\/\/.*\.instructure\.com\//.test(tab.url || "")) {
       status.innerHTML =
         `<span class="error">Open this on a Canvas page (https://*.instructure.com/...)</span>`;
       return;
     }
+
+    // ask content for filtered courses (reuse your existing message handler)
     const resp = await chrome.tabs.sendMessage(tab.id, {
       type: "FETCH_COURSES_FILTERED",
-      termFilter,
+      termFilter: termText,
     });
     if (!resp?.ok) {
       status.innerHTML = `<span class="error">Failed: ${
@@ -346,29 +412,40 @@ document.getElementById("fetchBtn").addEventListener("click", async () => {
       return;
     }
 
+    // cache + render
     lastCourses.length = 0;
     lastCourses.push(...resp.courses);
-    status.textContent =
-      `Showing ${resp.courses.length} course(s) for "${termFilter}".`;
     renderCourses(resp.courses);
+    status.textContent =
+      `Showing ${resp.courses.length} course(s) for "${termText}".`;
 
-    // Now compute availability per course (async) and update the UI as results come in
+    // now compute availability per course (your existing loop)
     for (const course of resp.courses) {
       try {
         const avail = await computeCourseAvailability(tab, course);
         availabilityByCourseId.set(course.id, avail);
+
         const label = document.getElementById(`avail-${course.id}`);
-        if (label) {
-          if (avail.availableSections > 0) {
+        const ck = document.getElementById(`ck-${course.id}`);
+
+        if (avail.availableSections > 0) {
+          if (label) {
             label.textContent =
               `Available: ${avail.availableSections} of ${avail.totalSections} section(s)`;
-            // enable the Send button
-            const btn = document.querySelector(
-              `.btn-send[data-courseid="${course.id}"]`,
-            );
-            if (btn) btn.removeAttribute("disabled");
-          } else {
+          }
+          if (ck) {
+            ck.disabled = false;
+            ck.checked = true;
+            selectedCourseIds.add(course.id);
+          }
+        } else {
+          if (label) {
             label.textContent = `Already sent for all sections this term`;
+          }
+          if (ck) {
+            ck.checked = false;
+            ck.disabled = true;
+            selectedCourseIds.delete(course.id);
           }
         }
       } catch (e) {
@@ -383,5 +460,61 @@ document.getElementById("fetchBtn").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
     status.innerHTML = `<span class="error">${String(err)}</span>`;
+  }
+}
+
+sendSelectedBtn?.addEventListener("click", async () => {
+  const ids = Array.from(selectedCourseIds);
+  if (!ids.length) {
+    alert("Select at least one course with availability.");
+    return;
+  }
+
+  // Lock UI
+  sendSelectedBtn.setAttribute("disabled", "true");
+  fetchBtn?.setAttribute("disabled", "true");
+  showProgress(true);
+  setProgress(0, ids.length);
+
+  let done = 0;
+
+  try {
+    for (const courseId of ids) {
+      const course = lastCourses.find((c) => c.id === courseId);
+      if (!course) {
+        done++;
+        setProgress(done, ids.length);
+        continue;
+      }
+
+      const statusEl = document.getElementById(`avail-${course.id}`);
+      const rowBtn = document.querySelector(
+        `.btn-send[data-courseid="${course.id}"]`,
+      );
+      const ck = document.getElementById(`ck-${course.id}`);
+
+      // Disable row controls during send
+      rowBtn?.setAttribute("disabled", "true");
+      ck?.setAttribute("disabled", "true");
+
+      try {
+        await handleSendLinkForCourse(course, statusEl);
+        // After success, unselect + disable
+        ck && (ck.checked = false);
+        selectedCourseIds.delete(course.id);
+      } catch (e) {
+        statusEl && (statusEl.innerHTML = `<span class="error">${String(e)}`);
+        // Leave checkbox unchecked so user can retry later
+      }
+
+      done++;
+      setProgress(done, ids.length);
+      // small pause between courses
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  } finally {
+    showProgress(false);
+    sendSelectedBtn.removeAttribute("disabled");
+    fetchBtn?.removeAttribute("disabled");
   }
 });
