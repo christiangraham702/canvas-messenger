@@ -183,6 +183,47 @@ randomizeBtn?.addEventListener("click", async () => {
 });
 
 /* =========================
+   Progress Bar Helpers
+   ========================= */
+// --- Chunk-based progress model ---
+const progressModel = {
+  totalChunksPlanned: 0,
+  sentChunks: 0,
+  perCourse: new Map(), // courseId -> { totalChunks: number, sentChunks: number }
+};
+
+function resetProgressModel() {
+  progressModel.totalChunksPlanned = 0;
+  progressModel.sentChunks = 0;
+  progressModel.perCourse.clear();
+}
+
+function recomputeSentChunks() {
+  let sum = 0;
+  for (const v of progressModel.perCourse.values()) {
+    sum += v.sentChunks || 0;
+  }
+  progressModel.sentChunks = sum;
+}
+
+function updateOverallProgress() {
+  const total = progressModel.totalChunksPlanned;
+  const done = progressModel.sentChunks;
+  if (total > 0) {
+    // switch to determinate
+    progressBar.classList.remove("indeterminate");
+    const pct = Math.round((done / total) * 100);
+    progressBar.style.width = pct + "%";
+    progressLabel.textContent = `${pct}% (${done}/${total} chunks)`;
+  } else {
+    // while we don't know totals yet, show an indeterminate animation
+    progressBar.classList.add("indeterminate");
+    progressBar.style.width = "30%"; // small bar that animates
+    progressLabel.textContent = "Preparing…";
+  }
+}
+
+/* =========================
    Get person using exension
    ========================= */
 // Cache the current user so we don’t refetch every section
@@ -555,10 +596,11 @@ sendSelectedBtn?.addEventListener("click", async () => {
     return;
   }
 
-  // Lock UI
+  // Lock UI and init chunk-based progress
   sendSelectedBtn.setAttribute("disabled", "true");
+  resetProgressModel();
   showProgress(true);
-  setProgress(0, ids.length);
+  updateOverallProgress(); // start indeterminate until plans arrive
 
   let done = 0;
 
@@ -595,5 +637,34 @@ sendSelectedBtn?.addEventListener("click", async () => {
     showProgress(false);
     sendSelectedBtn.removeAttribute("disabled");
     updatePreview(); // update preview after selection changes
+  }
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "SEND_PLAN") {
+    const { courseId, totalChunks } = msg;
+    let pc = progressModel.perCourse.get(courseId);
+    if (!pc) {
+      pc = { totalChunks: 0, sentChunks: 0 };
+      progressModel.perCourse.set(courseId, pc);
+    }
+    if (!pc.totalChunks) {
+      pc.totalChunks = totalChunks;
+      progressModel.totalChunksPlanned += totalChunks;
+    }
+    updateOverallProgress();
+  }
+
+  if (msg?.type === "SEND_CHUNK_DONE") {
+    const { courseId, chunk, totalChunks } = msg;
+    let pc = progressModel.perCourse.get(courseId);
+    if (!pc) {
+      pc = { totalChunks: totalChunks || 0, sentChunks: 0 };
+      progressModel.perCourse.set(courseId, pc);
+      if (pc.totalChunks) progressModel.totalChunksPlanned += pc.totalChunks;
+    }
+    pc.sentChunks = Math.max(pc.sentChunks || 0, chunk || 0);
+    recomputeSentChunks();
+    updateOverallProgress();
   }
 });

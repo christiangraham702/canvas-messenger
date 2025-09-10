@@ -263,7 +263,6 @@ function chunk(arr, n) {
   return out;
 }
 
-// Main: send to ALL students in a course (chunked ≤100)
 async function sendLinkToCourseStudents(
   { courseId, subject, body, csrfToken },
   progressCb,
@@ -277,13 +276,23 @@ async function sendLinkToCourseStudents(
   // 2) Chunk & send with retries per chunk
   const batches = chunk(ids, 100);
   const results = [];
+
+  // 🔔 Tell popup our plan for this course
+  try {
+    chrome.runtime.sendMessage({
+      type: "SEND_PLAN",
+      courseId,
+      totalRecipients: ids.length,
+      totalChunks: batches.length,
+    });
+  } catch {}
+
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
-    progressCb?.(
-      `Sending chunk ${i + 1}/${batches.length} (${batch.length} recipients)…`,
-    );
+    const human = `${i + 1}/${batches.length}`;
+    progressCb?.(`Sending chunk ${human} (${batch.length} recipients)…`);
 
-    // Try up to 3 attempts per chunk (postConversation already has CSRF refresh + inner retries)
+    // Try up to 3 attempts per chunk (CSRF refresh built into postConversation)
     await withRetries(
       () =>
         sendConversationChunk({
@@ -296,9 +305,20 @@ async function sendLinkToCourseStudents(
       { retries: 2, baseDelay: 800 },
     );
 
+    // 🔔 Tell popup a chunk finished
+    try {
+      chrome.runtime.sendMessage({
+        type: "SEND_CHUNK_DONE",
+        courseId,
+        chunk: i + 1,
+        totalChunks: batches.length,
+      });
+    } catch {}
+
     results.push({ chunk: i + 1, size: batch.length });
     await sleep(300); // small spacing
   }
+
   return { totalRecipients: ids.length, chunks: batches.length, results };
 }
 

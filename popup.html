@@ -334,6 +334,26 @@
       width: 30px;
       height: 30px;
     }
+
+    /* Indeterminate progress animation */
+    .progress-inner.indeterminate {
+      position: relative;
+      animation: indeterminate-slide 1.2s infinite ease-in-out;
+    }
+
+    @keyframes indeterminate-slide {
+      0% {
+        transform: translateX(-120%);
+      }
+
+      50% {
+        transform: translateX(0%);
+      }
+
+      100% {
+        transform: translateX(120%);
+      }
+    }
   </style>
 </head>
 
