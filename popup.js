@@ -28,9 +28,7 @@ const selectedCourseIds = new Set();
 const lastCourses = []; // cache in popup to attach buttons
 const availabilityByCourseId = new Map();
 
-const introSection = document.getElementById("introSection");
 const coursesSection = document.getElementById("coursesSection");
-const introFindBtn = document.getElementById("introFindBtn");
 
 const progressWrap = document.getElementById("progressWrap");
 const progressBar = document.getElementById("progressBar");
@@ -185,6 +183,18 @@ randomizeBtn?.addEventListener("click", async () => {
 });
 
 /* =========================
+   Get person using exension
+   ========================= */
+// Cache the current user so we don’t refetch every section
+let cachedUser = null;
+async function getCurrentUser() {
+  if (!cachedUser) {
+    cachedUser = await chrome.tabs.sendMessage(tab.id, { type: "FETCH_SELF" });
+  }
+  return cachedUser;
+}
+
+/* =========================
    Sections / availability
    ========================= */
 async function loadSectionsFromContent(tabId, courseId) {
@@ -312,7 +322,7 @@ function renderCourses(courses) {
    ========================= */
 document.addEventListener("DOMContentLoaded", () => {
   coursesSection.classList.remove("hidden");
-  fetchAndRenderCoursesForTerm("Spring 2024");
+  fetchAndRenderCoursesForTerm("Ongoing Term");
 });
 /* =========================
    Collect remaining sections for a course
@@ -360,11 +370,9 @@ async function handleSendLinkForCourse(course, statusEl) {
     normalizeCourseCode(course.course_code)
   }`;
 
-  // const subject = "Join the CourseLynx group chat";
-  const subject = "test";
+  const subject = "Join the CourseLynx group chat";
   const intro = TEMPLATES[currentTemplateIdx] || TEMPLATES[0];
-  //  const body = `${intro} ${joinUrl}`;
-  const body = "test";
+  const body = `${intro} ${joinUrl}`;
   statusEl.textContent = "Checking remaining sections…";
   const { sectionIds, canvasHost } = await collectRemainingSectionIds(
     tab,
@@ -378,6 +386,8 @@ async function handleSendLinkForCourse(course, statusEl) {
   // Claim all unclaimed sections (one by one)
   statusEl.textContent = `Claiming ${sectionIds.length} section(s)…`;
   const claims = [];
+  const userProfile = await getCurrentUser();
+  const senderEmail = userProfile?.primary_email || null;
   for (const sid of sectionIds) {
     try {
       const claim = await claimCourse({
@@ -390,7 +400,7 @@ async function handleSendLinkForCourse(course, statusEl) {
         termKey,
         termLabel,
         linkUrl: joinUrl,
-        sender: null,
+        sender: senderEmail,
       });
       if (claim && !claim.already_exists) {
         claims.push({ sectionId: sid, claimId: claim.id });

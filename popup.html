@@ -25,11 +25,6 @@
       overflow: hidden;
     }
 
-    header {
-      background: var(--white);
-      color: var(--royal-blue);
-      padding: 14px 16px;
-    }
 
     header h3 {
       margin: 0;
@@ -182,6 +177,7 @@
       color: var(--royal-blue);
       font-weight: 800;
       margin: 0;
+      font-size: 1rem;
     }
 
     .section-label {
@@ -315,12 +311,38 @@
       width: 0%;
       background: #0052cc;
     }
+
+    header {
+      background: var(--white);
+      color: var(--royal-blue);
+      padding: 14px 16px;
+
+      display: flex;
+      justify-content: center;
+      /* center horizontally */
+      align-items: center;
+      /* center vertically */
+    }
+
+    .header-inner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo {
+      width: 30px;
+      height: 30px;
+    }
   </style>
 </head>
 
 <body>
   <header>
-    <h3 class="panel-title">CourseLynx</h3>
+    <div class="header-inner">
+      <img src="images/extension_logo.png" alt="CourseLynx logo" class="logo" />
+      <h3 class="panel-title">CourseLynx</h3>
+    </div>
   </header>
 
   <!-- Intro / Welcome -->

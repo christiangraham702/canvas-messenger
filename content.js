@@ -81,6 +81,15 @@ startKeepAlive();
 
 // -------- utils --------
 
+async function fetchCurrentUserProfile() {
+  const url = `${location.origin}/api/v1/users/self/profile`;
+  const res = await fetchWithRetry(url, { credentials: "include" });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch self profile: ${res.status}`);
+  }
+  return res.json();
+}
+
 // get all sections for a course
 async function fetchSections(courseId) {
   const url =
@@ -304,7 +313,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg.type === "FETCH_COURSES_FILTERED") {
         const courses = await fetchMyCoursesFiltered(
-          msg.termFilter || "Spring 2023",
+          msg.termFilter || "Fall 2025",
         );
         sendResponse({ ok: true, courses });
         return;
@@ -312,6 +321,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "PING") {
         sendResponse({ ok: true });
         return; // no async work
+      }
+      if (msg.type === "FETCH_SELF") {
+        const profile = await fetchCurrentUserProfile();
+        sendResponse(profile);
+        return;
       }
 
       if (msg.type === "FETCH_COURSES") {
