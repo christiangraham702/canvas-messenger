@@ -226,12 +226,13 @@ function updateOverallProgress() {
 /* =========================
    Get person using exension
    ========================= */
-// Cache the current user so we don’t refetch every section
+// Cache the current user so we don’t refetch
 let cachedUser = null;
 async function getCurrentUser() {
-  if (!cachedUser) {
-    cachedUser = await chrome.tabs.sendMessage(tab.id, { type: "FETCH_SELF" });
-  }
+  if (cachedUser) return cachedUser;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("No active Canvas tab found.");
+  cachedUser = await chrome.tabs.sendMessage(tab.id, { type: "FETCH_SELF" });
   return cachedUser;
 }
 
@@ -363,7 +364,7 @@ function renderCourses(courses) {
    ========================= */
 document.addEventListener("DOMContentLoaded", () => {
   coursesSection.classList.remove("hidden");
-  fetchAndRenderCoursesForTerm("Ongoing Term");
+  fetchAndRenderCoursesForTerm("Fall 2025");
 });
 /* =========================
    Collect remaining sections for a course
