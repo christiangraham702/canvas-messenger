@@ -54,15 +54,6 @@ function showProgress(show) {
   if (!show) setProgress(0, 0);
 }
 
-function normalizeCourseCode(code) {
-  return (code || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_") // replace spaces with underscore
-    .replace(/[^a-z0-9_]/g, "") // strip unwanted chars
-    .replace(/([a-z])([0-9])/g, "$1_$2"); // insert underscore between letter and number
-}
-
 const SCHOOL_OVERRIDES = new Map([
   // explicit overrides you mentioned:
   ["usflearn", "usf"],
@@ -125,6 +116,90 @@ function isCanvasUrl(u) {
   } catch {
     return false;
   }
+}
+
+/* =========================
+   Get the right course code
+   ========================= */
+// ---- Term tokens to strip from course_code/name before parsing subject+number ----
+const TERM_TOKENS_RE = new RegExp(
+  [
+    // Compact codes like 2025FA, 2025SP, FA2025, SP2025, AU2025 (FSU uses AU=Autumn/Fall)
+    String.raw`\b(20\d{2})(?:\s*[-_ ]?)?(FA|SP|SU|SM|WI|AU)\b`,
+    String.raw`\b(FA|SP|SU|SM|WI|AU)(?:\s*[-_ ]?)?(20\d{2})\b`,
+    // Wordy forms like "Fall 2025", "2025 Fall", "2025 Fall 1", "Fall 2025 Main"
+    String.raw`\b(20\d{2})\s*(fall|autumn|spring|summer|winter)\b`,
+    String.raw`\b(fall|autumn|spring|summer|winter)\s*(20\d{2})\b`,
+    // Standalone season words with optional session marker
+    String.raw`\b(fall|autumn|spring|summer|winter)\s*\d?\b`,
+    // Extra: AU 2025 (explicit space form)
+    String.raw`\bau\s*20\d{2}\b`,
+  ].join("|"),
+  "gi",
+);
+
+// Remove parenthetical chunks like "(12345)" or "(Lecture)"
+const PARENS_RE = /\([^)]*\)/g;
+
+// Map some long subject words to their short code (tweak as you learn schools)
+const SUBJECT_MAP = {
+  BIOLOGY: "biol",
+  CHEMISTRY: "chem",
+  PHYSICS: "phys",
+  PHILOSOPHY: "phil",
+  // OSU-style multiword subjects (ARTSSCI, BUSFIN, BIOCHEM) should pass through.
+};
+
+// Try to extract SUBJECT + 3–4 digit number and return "subject_1234"
+function parseSubjectNumberSlug(raw) {
+  if (!raw) return null;
+  let s = String(raw).toUpperCase();
+
+  // Drop parentheses and term tokens like "AU2025", "Fall 2025", "2025 Fall 1"
+  s = s.replace(PARENS_RE, " ");
+  s = s.replace(TERM_TOKENS_RE, " ");
+  s = s.replace(/\s+/g, " ").trim();
+
+  // Pattern: SUBJECT 1234(.section)? or SUBJECT1234
+  // e.g., "ARTSSCI 1100.14", "BUSFIN 3220", "BIOCHEM4511", "BIOLOGY 1114.01"
+  let m = s.match(/\b([A-Z&]{2,})\s*([0-9]{3,4})(?:[.\-][0-9A-Z]{1,3})?\b/);
+  if (!m) {
+    // fallback where subject & number are stuck but followed by junk
+    m = s.match(/\b([A-Z&]{2,}?)([0-9]{3,4})\b/);
+  }
+  if (!m) return null;
+
+  let subj = m[1];
+  const num = m[2];
+
+  // Normalize subject token -> lowercase, '&' -> 'and'
+  let subjNorm = subj.toLowerCase().replace(/&/g, "and");
+  if (SUBJECT_MAP[subj]) subjNorm = SUBJECT_MAP[subj];
+
+  return `${subjNorm}_${num}`;
+}
+
+// Fallback slug if we can’t parse a clean subject+number
+function fallbackSlug(raw) {
+  return (raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "")
+    .replace(/([a-z])([0-9])/g, "$1_$2"); // add underscore between letter+digit
+}
+
+// Given a course object, produce the best join-link slug
+function courseSlugFromCourse(course) {
+  // Try course_code first (usually best), then name
+  const try1 = parseSubjectNumberSlug(course?.course_code);
+  if (try1) return try1;
+
+  const try2 = parseSubjectNumberSlug(course?.name);
+  if (try2) return try2;
+
+  // Fallback to normalized course_code or name
+  return fallbackSlug(course?.course_code || course?.name || "");
 }
 
 /* =========================
@@ -199,7 +274,7 @@ async function updatePreview() {
     const host = new URL(tab.url).host;
     const school = extractSchool(host);
     link = `https://app.courselynx.com/join/${school}/${
-      normalizeCourseCode(course.course_code)
+      courseSlugFromCourse(course)
     }`;
   }
 
@@ -449,7 +524,7 @@ async function handleSendLinkForCourse(course, statusEl) {
   const termKey = toTermKey(termLabel);
 
   const joinUrl = `https://app.courselynx.com/join/${extractSchool(host)}/${
-    normalizeCourseCode(course.course_code)
+    courseSlugFromCourse(course)
   }`;
 
   const subject = "Join the CourseLynx group chat";

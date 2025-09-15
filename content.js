@@ -177,33 +177,112 @@ async function postConversation(
   throw lastErr;
 }
 
-// Normalize term labels for fuzzy matching
-function norm(s) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/spring\s*'?([0-9]{2})\b/g, "spring 20$1") // spring '23 => spring 2023
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+// Map many season variants to a canonical token
+function normalizeSeasonToken(s) {
+  if (!s) return null;
+  s = s.toLowerCase();
+  // common aliases/abbreviations
+  if (/(fall|fa|autumn)/.test(s)) return "fall";
+  if (/(spring|sp)/.test(s)) return "spring";
+  if (/(winter|wi)/.test(s)) return "winter";
+  if (/(summer|su|sm)/.test(s)) return "summer";
+  // some schools use A/B/C for summer, but we still treat as "summer"
+  return null;
 }
 
-// to make sure correct semester
-function isTermMatch(course, wantedLabel) {
-  const w = norm(wantedLabel);
-  const termName = norm(
-    course?.enrollment_term?.name || course?.term?.name || "",
-  );
-  const courseName = norm(course?.name || "");
-  if (!w) return true;
-  if (termName.includes(w)) return true;
-  if (courseName.includes(w)) return true;
-  if (w === "spring 2023") {
-    const start = course.start_at ? new Date(course.start_at) : null;
-    const end = course.end_at ? new Date(course.end_at) : null;
-    if (start && start.getFullYear() === 2023 && start.getMonth() <= 5) {
-      return true;
-    }
-    if (end && end.getFullYear() === 2023 && end.getMonth() <= 6) return true;
+// Extract { season, year } from a free-form label like:
+// "Fall 2025", "2025 Fall 1", "Term: 2025FA", "FA 2025", "2025SU B"
+function parseSeasonYear(label) {
+  if (!label) return { season: null, year: null };
+
+  const raw = String(label).trim().toLowerCase();
+
+  // Try compact codes like "2025fa" / "fa2025"
+  let m = raw.match(/\b(20\d{2}|19\d{2})(?:\s*[-_ ]?)?(fa|sp|su|sm|wi)\b/);
+  if (m) {
+    const year = parseInt(m[1], 10);
+    const season = normalizeSeasonToken(m[2]);
+    if (season && year) return { season, year };
   }
+  m = raw.match(/\b(fa|sp|su|sm|wi)(?:\s*[-_ ]?)?(20\d{2}|19\d{2})\b/);
+  if (m) {
+    const season = normalizeSeasonToken(m[1]);
+    const year = parseInt(m[2], 10);
+    if (season && year) return { season, year };
+  }
+
+  // Generic “word + year” in any order, e.g. "2025 fall 1", "fall 2025 main"
+  // Capture first season word we recognize and a 4-digit year
+  const seasonMatch = raw.match(
+    /\b(fall|autumn|spring|winter|summer|fa|sp|su|sm|wi)\b/,
+  );
+  const yearMatch = raw.match(/\b(20\d{2}|19\d{2})\b/);
+
+  const season = normalizeSeasonToken(seasonMatch && seasonMatch[1]);
+  const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
+
+  return { season: season || null, year: year || null };
+}
+
+// Decide if a course belongs to the requested term.
+// - wantedLabel is what you pass from popup (e.g., "Fall 2025")
+// - We check the course's term label if present; fall back to course name/date windows.
+function isTermMatch(course, wantedLabel) {
+  // Parse the desired season/year
+  const want = parseSeasonYear(wantedLabel);
+  if (!want.season || !want.year) {
+    // If the filter couldn't be parsed, treat as "no filter"
+    return true;
+  }
+
+  // Try enrollment term name first (or course name as a backup)
+  const termStr = course?.enrollment_term?.name || course?.term?.name ||
+    course?.name || "";
+  const have = parseSeasonYear(termStr);
+
+  // If both parsed cleanly, require exact season + year match
+  if (have.season && have.year) {
+    return (have.season === want.season) && (have.year === want.year);
+  }
+
+  // Fallback heuristic: use dates if available (windows by season)
+  // This helps when schools hide season in names but have start/end times.
+  const start = course.start_at ? new Date(course.start_at) : null;
+  const end = course.end_at ? new Date(course.end_at) : null;
+  if (start) {
+    const y = start.getFullYear();
+    if (y === want.year) {
+      const m = start.getMonth(); // 0=Jan
+      switch (want.season) {
+        case "spring":
+          return m >= 0 && m <= 5; // Jan–Jun
+        case "summer":
+          return m >= 4 && m <= 8; // May–Sep (covers A/B/C)
+        case "fall":
+          return m >= 7 && m <= 11; // Aug–Dec; FSU's "Fall 1/2" start ~Aug
+        case "winter":
+          return m === 11 || m <= 1; // Dec–Feb
+      }
+    }
+  }
+  if (end) {
+    const y = end.getFullYear();
+    if (y === want.year) {
+      const m = end.getMonth();
+      switch (want.season) {
+        case "spring":
+          return m >= 0 && m <= 6; // end by July
+        case "summer":
+          return m >= 4 && m <= 9; // end by Oct
+        case "fall":
+          return m >= 8 && m <= 11; // end Sept–Dec
+        case "winter":
+          return m === 11 || m <= 1; // Dec–Feb
+      }
+    }
+  }
+
+  // If we can't prove it's the requested term, exclude it.
   return false;
 }
 

@@ -7,11 +7,12 @@
 const API_URL_FILTER = {
   urls: [
     "https://*.instructure.com/*",
-    "https://canvas.*/*",
-    "https://webcourses.*/*",
-    "https://bruinlearn.*/*",
-    "https://learn.*/*",
-    // Add more branded prefixes here if you encounter them (e.g., "https://lms.*/*")
+    "https://canvas.wisc.edu/*",
+    "https://webcourses.ucf.edu/*",
+    "https://bruinlearn.ucla.edu/*",
+    "https://canvas.fsu.edu/*",
+    "https://canvas.*.edu/*",
+    "https://canvas.tamu.edu/*",
   ],
 };
 
