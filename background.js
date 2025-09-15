@@ -4,7 +4,16 @@
 //   csrfCookie: { value: "<_csrf_token cookie>", seenAt: 1690000000000 } | undefined
 // }
 
-const API_URL_FILTER = { urls: ["https://*.instructure.com/*"] };
+const API_URL_FILTER = {
+  urls: [
+    "https://*.instructure.com/*",
+    "https://canvas.*/*",
+    "https://webcourses.*/*",
+    "https://bruinlearn.*/*",
+    "https://learn.*/*",
+    // Add more branded prefixes here if you encounter them (e.g., "https://lms.*/*")
+  ],
+};
 
 // Prefer tokens from request headers (X-CSRF-Token) because that's what Canvas UI actually uses.
 // We also track the most recent _csrf_token seen in Set-Cookie response headers as a fallback.

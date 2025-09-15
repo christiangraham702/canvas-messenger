@@ -63,12 +63,34 @@ function normalizeCourseCode(code) {
     .replace(/([a-z])([0-9])/g, "$1_$2"); // insert underscore between letter and number
 }
 
+const SCHOOL_OVERRIDES = new Map([
+  // explicit overrides you mentioned:
+  ["usflearn", "usf"],
+  ["bruinlearn", "ucla"], // bruinlearn.ucla.edu -> ucla
+]);
+
 function extractSchool(host) {
   if (!host) return "";
+
+  // 1) *.instructure.com => take first label (with overrides)
   if (host.endsWith(".instructure.com")) {
-    return host.replace(".instructure.com", "").split(".").pop();
+    const first = host.split(".")[0];
+    return SCHOOL_OVERRIDES.get(first) || first;
   }
-  return host.split(".")[0];
+
+  // 2) canvas/learn/webcourses/bruinlearn.school.tld => take 2nd label
+  //    e.g., canvas.wisc.edu -> wisc, webcourses.ucf.edu -> ucf
+  const m = host.match(/^(canvas|learn|webcourses|bruinlearn)\.([^.]+)/i);
+  if (m) {
+    const lbl = m[2].toLowerCase();
+    // If the branded subdomain itself maps to an override, respect it.
+    const branded = m[1].toLowerCase();
+    const overrideKey = SCHOOL_OVERRIDES.get(branded);
+    return overrideKey || lbl;
+  }
+
+  // 3) Otherwise: use first label as a fallback
+  return host.split(".")[0].toLowerCase();
 }
 
 function fmtTime(ts) {
@@ -85,6 +107,24 @@ function toTermKey(label) {
 }
 function getTermLabel(c) {
   return c?.enrollment_term?.name || c?.term?.name || "";
+}
+
+// check if on canvas
+function isCanvasUrl(u) {
+  try {
+    const { host, protocol } = new URL(u);
+    if (protocol !== "https:") return false;
+    // 1) Standard Canvas cloud
+    if (host.endsWith(".instructure.com")) return true;
+    // 2) Common school-hosted Canvas domains
+    //    canvas.wisc.edu, webcourses.ucf.edu, bruinlearn.ucla.edu, etc.
+    if (/^(canvas|learn|webcourses|bruinlearn)\./i.test(host)) return true;
+    // 3) Add other branded prefixes you encounter later (e.g., "lms.", "elearning.")
+    // if (/^(lms|elearning)\./i.test(host)) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /* =========================
@@ -515,9 +555,10 @@ async function fetchAndRenderCoursesForTerm(termText = "Fall 2025") {
   try {
     const tab =
       (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-    if (!tab || !/^https:\/\/.*\.instructure\.com\//.test(tab.url || "")) {
+
+    if (!tab || !isCanvasUrl(tab.url || "")) {
       status.innerHTML =
-        `<span class="error">Open this on a Canvas page (https://*.instructure.com/...)</span>`;
+        `<span class="error">Open this on a Canvas page (e.g., *.instructure.com, canvas.*.edu, webcourses.*.edu)</span>`;
       return;
     }
 

@@ -90,6 +90,14 @@ async function fetchCurrentUserProfile() {
   return res.json();
 }
 
+function isCanvasOrigin() {
+  const { host, protocol } = location;
+  if (protocol !== "https:") return false;
+  if (host.endsWith(".instructure.com")) return true;
+  if (/^(canvas|learn|webcourses|bruinlearn)\./i.test(host)) return true;
+  return false;
+}
+
 // get all sections for a course
 async function fetchSections(courseId) {
   const url =
@@ -326,7 +334,7 @@ async function sendLinkToCourseStudents(
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
-      if (!/^https:\/\/.*\.instructure\.com$/.test(location.origin)) {
+      if (!isCanvasOrigin()) {
         sendResponse({ ok: false, error: "Not on a Canvas origin." });
         return;
       }
