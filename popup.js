@@ -478,7 +478,7 @@ function renderCourses(courses) {
    ========================= */
 document.addEventListener("DOMContentLoaded", () => {
   coursesSection.classList.remove("hidden");
-  fetchAndRenderCoursesForTerm("Spring 2024");
+  fetchAndRenderCoursesForTerm("Fall 2023");
 });
 /* =========================
    Collect remaining sections for a course
