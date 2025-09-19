@@ -341,13 +341,12 @@ function updateOverallProgress() {
 /* =========================
    Get person using exension
    ========================= */
-// Cache the current user so we don’t refetch
+// Cache the current user so we don’t refetch every section
 let cachedUser = null;
 async function getCurrentUser() {
-  if (cachedUser) return cachedUser;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("No active Canvas tab found.");
-  cachedUser = await chrome.tabs.sendMessage(tab.id, { type: "FETCH_SELF" });
+  if (!cachedUser) {
+    cachedUser = await chrome.tabs.sendMessage(tab.id, { type: "FETCH_SELF" });
+  }
   return cachedUser;
 }
 
