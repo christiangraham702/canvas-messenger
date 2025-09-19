@@ -68,7 +68,6 @@ function startKeepAlive() {
       chrome.runtime.sendMessage({ type: "PING" }, () => {});
     } catch {}
     try {
-      // cheap HEAD to a tiny endpoint; adjust if your school blocks HEAD
       await fetch(`${location.origin}/api/v1/users/self`, {
         method: "HEAD",
         credentials: "include",
@@ -79,14 +78,17 @@ function startKeepAlive() {
 }
 startKeepAlive();
 
-// -------- utils --------
+// -------- misc utils / constants --------
+const MAX_PER_REQUEST = 90; // keep well under Canvas ~100 cap
+
+function uniqueInts(arr) {
+  return Array.from(new Set(arr.map(Number).filter(Number.isFinite)));
+}
 
 async function fetchCurrentUserProfile() {
   const url = `${location.origin}/api/v1/users/self/profile`;
   const res = await fetchWithRetry(url, { credentials: "include" });
-  if (!res.ok) {
-    throw new Error(`Failed to fetch self profile: ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`Failed to fetch self profile: ${res.status}`);
   return res.json();
 }
 
@@ -95,10 +97,81 @@ function isCanvasOrigin() {
   if (protocol !== "https:") return false;
   if (host.endsWith(".instructure.com")) return true;
   if (/^(canvas|learn|webcourses|bruinlearn)\./i.test(host)) return true;
+  // (Add other branded prefixes here if needed)
   return false;
 }
 
-// get all sections for a course
+// -------- term parsing (robust: "2025 Fall 1", "FA2025", etc.) --------
+function normalizeSeasonToken(s) {
+  if (!s) return null;
+  s = s.toLowerCase();
+  if (/(fall|fa|autumn)/.test(s)) return "fall";
+  if (/(spring|sp)/.test(s)) return "spring";
+  if (/(winter|wi)/.test(s)) return "winter";
+  if (/(summer|su|sm)/.test(s)) return "summer";
+  return null;
+}
+
+function parseSeasonYear(label) {
+  if (!label) return { season: null, year: null };
+  const raw = String(label).trim().toLowerCase();
+
+  let m = raw.match(/\b(20\d{2}|19\d{2})(?:\s*[-_ ]?)?(fa|sp|su|sm|wi)\b/);
+  if (m) {
+    const year = parseInt(m[1], 10);
+    const season = normalizeSeasonToken(m[2]);
+    if (season && year) return { season, year };
+  }
+  m = raw.match(/\b(fa|sp|su|sm|wi)(?:\s*[-_ ]?)?(20\d{2}|19\d{2})\b/);
+  if (m) {
+    const season = normalizeSeasonToken(m[1]);
+    const year = parseInt(m[2], 10);
+    if (season && year) return { season, year };
+  }
+
+  const seasonMatch = raw.match(
+    /\b(fall|autumn|spring|winter|summer|fa|sp|su|sm|wi)\b/,
+  );
+  const yearMatch = raw.match(/\b(20\d{2}|19\d{2})\b/);
+  const season = normalizeSeasonToken(seasonMatch && seasonMatch[1]);
+  const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
+
+  return { season: season || null, year: year || null };
+}
+
+function isTermMatch(course, wantedLabel) {
+  const want = parseSeasonYear(wantedLabel);
+  if (!want.season || !want.year) return true;
+
+  const termStr = course?.enrollment_term?.name || course?.term?.name ||
+    course?.name || "";
+  const have = parseSeasonYear(termStr);
+
+  if (have.season && have.year) {
+    return have.season === want.season && have.year === want.year;
+  }
+
+  // Fallback by dates if present
+  const start = course.start_at ? new Date(course.start_at) : null;
+  const end = course.end_at ? new Date(course.end_at) : null;
+  if (start && start.getFullYear() === want.year) {
+    const m = start.getMonth();
+    if (want.season === "spring") return m >= 0 && m <= 5;
+    if (want.season === "summer") return m >= 4 && m <= 8;
+    if (want.season === "fall") return m >= 7 && m <= 11;
+    if (want.season === "winter") return m === 11 || m <= 1;
+  }
+  if (end && end.getFullYear() === want.year) {
+    const m = end.getMonth();
+    if (want.season === "spring") return m >= 0 && m <= 6;
+    if (want.season === "summer") return m >= 4 && m <= 9;
+    if (want.season === "fall") return m >= 8 && m <= 11;
+    if (want.season === "winter") return m === 11 || m <= 1;
+  }
+  return false;
+}
+
+// -------- sections / courses --------
 async function fetchSections(courseId) {
   const url =
     `${location.origin}/api/v1/courses/${courseId}/sections?per_page=100`;
@@ -114,176 +187,6 @@ async function fetchAllCanvas(url, acc = []) {
   const link = res.headers.get("Link") || "";
   const next = link.match(/<([^>]+)>;\s*rel="next"/);
   return next ? fetchAllCanvas(next[1], acc) : acc;
-}
-
-// Ask background for freshest CSRF
-async function getLatestCsrfFromBackground() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "GET_LATEST_CSRF" }, (resp) => {
-      resolve(resp?.csrf || null);
-    });
-  });
-}
-
-async function postConversation(
-  { courseId, recipientIds, subject, body, csrfToken },
-  timeoutMs = 45000,
-) {
-  const fd = new FormData();
-  recipientIds.forEach((id) => fd.append("recipients[]", String(id)));
-  if (subject) fd.append("subject", subject);
-  fd.append("body", body);
-  fd.append("context_code", `course_${courseId}`);
-  fd.append("group_conversation", "false"); // send individually
-  fd.append("bulk_message", "true"); // separate DMs per recipient
-
-  const doPost = async (csrf) => {
-    const res = await fetchWithRetry(
-      `${location.origin}/api/v1/conversations`,
-      {
-        method: "POST",
-        credentials: "include",
-        headers: { "X-CSRF-Token": csrf },
-        body: fd,
-        timeoutMs,
-        retries: 0, // we handle logic below so we can swap CSRF if needed
-      },
-    );
-    return res.json();
-  };
-
-  // Try with the provided token, then refresh CSRF once if 422, plus 2 general retries for 429/5xx/timeouts.
-  let attempt = 0;
-  let lastErr;
-
-  while (attempt < 3) {
-    try {
-      if (attempt === 0) return await doPost(csrfToken);
-      if (attempt === 1) {
-        // 2nd attempt: try with latest CSRF
-        const fresh = await getLatestCsrfFromBackground();
-        return await doPost(fresh || csrfToken);
-      }
-      // 3rd attempt: backoff + try again with whatever latest token we have
-      const fresh = await getLatestCsrfFromBackground();
-      return await doPost(fresh || csrfToken);
-    } catch (e) {
-      lastErr = e;
-      if (!shouldRetry(e) && e?.status !== 422) break;
-      await sleep(600 * Math.pow(2, attempt)); // 600ms, 1200ms
-      attempt++;
-    }
-  }
-  throw lastErr;
-}
-
-// Map many season variants to a canonical token
-function normalizeSeasonToken(s) {
-  if (!s) return null;
-  s = s.toLowerCase();
-  // common aliases/abbreviations
-  if (/(fall|fa|autumn)/.test(s)) return "fall";
-  if (/(spring|sp)/.test(s)) return "spring";
-  if (/(winter|wi)/.test(s)) return "winter";
-  if (/(summer|su|sm)/.test(s)) return "summer";
-  // some schools use A/B/C for summer, but we still treat as "summer"
-  return null;
-}
-
-// Extract { season, year } from a free-form label like:
-// "Fall 2025", "2025 Fall 1", "Term: 2025FA", "FA 2025", "2025SU B"
-function parseSeasonYear(label) {
-  if (!label) return { season: null, year: null };
-
-  const raw = String(label).trim().toLowerCase();
-
-  // Try compact codes like "2025fa" / "fa2025"
-  let m = raw.match(/\b(20\d{2}|19\d{2})(?:\s*[-_ ]?)?(fa|sp|su|sm|wi)\b/);
-  if (m) {
-    const year = parseInt(m[1], 10);
-    const season = normalizeSeasonToken(m[2]);
-    if (season && year) return { season, year };
-  }
-  m = raw.match(/\b(fa|sp|su|sm|wi)(?:\s*[-_ ]?)?(20\d{2}|19\d{2})\b/);
-  if (m) {
-    const season = normalizeSeasonToken(m[1]);
-    const year = parseInt(m[2], 10);
-    if (season && year) return { season, year };
-  }
-
-  // Generic “word + year” in any order, e.g. "2025 fall 1", "fall 2025 main"
-  // Capture first season word we recognize and a 4-digit year
-  const seasonMatch = raw.match(
-    /\b(fall|autumn|spring|winter|summer|fa|sp|su|sm|wi)\b/,
-  );
-  const yearMatch = raw.match(/\b(20\d{2}|19\d{2})\b/);
-
-  const season = normalizeSeasonToken(seasonMatch && seasonMatch[1]);
-  const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
-
-  return { season: season || null, year: year || null };
-}
-
-// Decide if a course belongs to the requested term.
-// - wantedLabel is what you pass from popup (e.g., "Fall 2025")
-// - We check the course's term label if present; fall back to course name/date windows.
-function isTermMatch(course, wantedLabel) {
-  // Parse the desired season/year
-  const want = parseSeasonYear(wantedLabel);
-  if (!want.season || !want.year) {
-    // If the filter couldn't be parsed, treat as "no filter"
-    return true;
-  }
-
-  // Try enrollment term name first (or course name as a backup)
-  const termStr = course?.enrollment_term?.name || course?.term?.name ||
-    course?.name || "";
-  const have = parseSeasonYear(termStr);
-
-  // If both parsed cleanly, require exact season + year match
-  if (have.season && have.year) {
-    return (have.season === want.season) && (have.year === want.year);
-  }
-
-  // Fallback heuristic: use dates if available (windows by season)
-  // This helps when schools hide season in names but have start/end times.
-  const start = course.start_at ? new Date(course.start_at) : null;
-  const end = course.end_at ? new Date(course.end_at) : null;
-  if (start) {
-    const y = start.getFullYear();
-    if (y === want.year) {
-      const m = start.getMonth(); // 0=Jan
-      switch (want.season) {
-        case "spring":
-          return m >= 0 && m <= 5; // Jan–Jun
-        case "summer":
-          return m >= 4 && m <= 8; // May–Sep (covers A/B/C)
-        case "fall":
-          return m >= 7 && m <= 11; // Aug–Dec; FSU's "Fall 1/2" start ~Aug
-        case "winter":
-          return m === 11 || m <= 1; // Dec–Feb
-      }
-    }
-  }
-  if (end) {
-    const y = end.getFullYear();
-    if (y === want.year) {
-      const m = end.getMonth();
-      switch (want.season) {
-        case "spring":
-          return m >= 0 && m <= 6; // end by July
-        case "summer":
-          return m >= 4 && m <= 9; // end by Oct
-        case "fall":
-          return m >= 8 && m <= 11; // end Sept–Dec
-        case "winter":
-          return m === 11 || m <= 1; // Dec–Feb
-      }
-    }
-  }
-
-  // If we can't prove it's the requested term, exclude it.
-  return false;
 }
 
 async function fetchMyCoursesFiltered(termFilter) {
@@ -302,13 +205,49 @@ async function fetchMyCoursesFiltered(termFilter) {
   return mapped.filter((c) => isTermMatch(c, termFilter));
 }
 
-// ======== Send link to everyone ==========
+// ======== messaging helpers ==========
+
+// Ask background for freshest CSRF
+async function getLatestCsrfFromBackground() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "GET_LATEST_CSRF" }, (resp) => {
+      resolve(resp?.csrf || null);
+    });
+  });
+}
+
+// Course users (students, active only) -> unique user IDs (exclude self + test student)
+async function fetchStudentUserIdsForCourse(courseId) {
+  const base = `${location.origin}/api/v1/courses/${courseId}/users` +
+    `?enrollment_type[]=student&enrollment_state[]=active&per_page=100`;
+
+  const me = await fetchCurrentUserProfile().catch(() => null);
+  const myId = me?.id ? Number(me.id) : null;
+
+  const rows = await withRetries(async () => {
+    return await canvasGETAll(base);
+  }, { retries: 2, baseDelay: 800 });
+
+  const ids = rows
+    .filter((u) => {
+      const uid = Number(u.id);
+      if (!Number.isFinite(uid)) return false;
+      if (myId != null && uid === myId) return false;
+      if (u.sis_user_id === "test_student") return false;
+      if (typeof u.name === "string" && /test student/i.test(u.name)) {
+        return false;
+      }
+      return true;
+    })
+    .map((u) => Number(u.id));
+
+  return uniqueInts(ids);
+}
 
 // Small paginator for Canvas REST (follows Link headers)
 async function canvasGETAll(url, timeoutMs = 30000) {
   const out = [];
   let next = url;
-
   while (next) {
     const res = await fetchWithRetry(next, {
       credentials: "include",
@@ -316,7 +255,6 @@ async function canvasGETAll(url, timeoutMs = 30000) {
     });
     const page = await res.json();
     out.push(...page);
-
     const link = res.headers.get("Link") || res.headers.get("link");
     const m = link && link.match(/<([^>]+)>;\s*rel="next"/);
     next = m ? m[1] : null;
@@ -324,22 +262,68 @@ async function canvasGETAll(url, timeoutMs = 30000) {
   return out;
 }
 
-// Course users (students, active only) -> unique user IDs
-async function fetchStudentUserIdsForCourse(courseId) {
-  const base = `${location.origin}/api/v1/courses/${courseId}/users` +
-    `?enrollment_type[]=student&enrollment_state[]=active&per_page=100`;
+// POST /conversations with hard guard for max recipients
+async function postConversation(
+  { courseId, recipientIds, subject, body, csrfToken },
+  timeoutMs = 45000,
+) {
+  if (!Array.isArray(recipientIds) || recipientIds.length === 0) {
+    throw new Error("No recipients in chunk.");
+  }
+  if (recipientIds.length > MAX_PER_REQUEST) {
+    throw new Error(
+      `Refusing to POST >${MAX_PER_REQUEST} recipients in one request.`,
+    );
+  }
 
-  // Extra robustness: wrap the whole pagination in retries
-  return withRetries(async () => {
-    const rows = await canvasGETAll(base);
-    return Array.from(new Set(rows.map((u) => u.id).filter(Boolean)));
-  }, { retries: 2, baseDelay: 800 });
+  const fd = new FormData();
+  recipientIds.forEach((id) => fd.append("recipients[]", String(id)));
+  if (subject) fd.append("subject", subject);
+  fd.append("body", body);
+  fd.append("context_code", `course_${courseId}`);
+  fd.append("group_conversation", "false"); // send individually
+  fd.append("bulk_message", "true"); // separate DMs per recipient
+
+  const doPost = async (csrf) => {
+    const res = await fetchWithRetry(
+      `${location.origin}/api/v1/conversations`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "X-CSRF-Token": csrf },
+        body: fd,
+        timeoutMs,
+        retries: 0, // we handle logic below
+      },
+    );
+    return res.json();
+  };
+
+  // Try with given token, then refresh CSRF, then back off and try again
+  let attempt = 0, lastErr;
+  while (attempt < 3) {
+    try {
+      if (attempt === 0) return await doPost(csrfToken);
+      const fresh = await getLatestCsrfFromBackground();
+      return await doPost(fresh || csrfToken);
+    } catch (e) {
+      lastErr = e;
+      if (!shouldRetry(e) && e?.status !== 422) break;
+      await sleep(600 * Math.pow(2, attempt)); // 600ms, 1200ms
+      attempt++;
+    }
+  }
+  throw lastErr;
 }
 
-// Send 1 chunk (≤100) as **individual messages** (not a group thread)
+// Send 1 chunk (≤ MAX_PER_REQUEST) as individual messages
 async function sendConversationChunk(
   { courseId, recipientIds, subject, body, csrfToken },
 ) {
+  if (recipientIds.length > MAX_PER_REQUEST) {
+    console.warn("Chunk too large, trimming:", recipientIds.length);
+    recipientIds = recipientIds.slice(0, MAX_PER_REQUEST);
+  }
   return postConversation({ courseId, recipientIds, subject, body, csrfToken });
 }
 
@@ -356,15 +340,16 @@ async function sendLinkToCourseStudents(
 ) {
   // 1) Resolve recipients
   progressCb?.(`Fetching course students…`);
-  const ids = await fetchStudentUserIdsForCourse(courseId);
+  let ids = await fetchStudentUserIdsForCourse(courseId);
+  ids = uniqueInts(ids);
 
   if (!ids.length) return { totalRecipients: 0, chunks: 0, results: [] };
 
   // 2) Chunk & send with retries per chunk
-  const batches = chunk(ids, 100);
+  const batches = chunk(ids, MAX_PER_REQUEST);
   const results = [];
 
-  // 🔔 Tell popup our plan for this course
+  // Notify popup of our plan
   try {
     chrome.runtime.sendMessage({
       type: "SEND_PLAN",
@@ -379,7 +364,6 @@ async function sendLinkToCourseStudents(
     const human = `${i + 1}/${batches.length}`;
     progressCb?.(`Sending chunk ${human} (${batch.length} recipients)…`);
 
-    // Try up to 3 attempts per chunk (CSRF refresh built into postConversation)
     await withRetries(
       () =>
         sendConversationChunk({
@@ -392,7 +376,7 @@ async function sendLinkToCourseStudents(
       { retries: 2, baseDelay: 800 },
     );
 
-    // 🔔 Tell popup a chunk finished
+    // Notify popup chunk finished
     try {
       chrome.runtime.sendMessage({
         type: "SEND_CHUNK_DONE",
@@ -403,7 +387,7 @@ async function sendLinkToCourseStudents(
     } catch {}
 
     results.push({ chunk: i + 1, size: batch.length });
-    await sleep(300); // small spacing
+    await sleep(300); // spacing
   }
 
   return { totalRecipients: ids.length, chunks: batches.length, results };
@@ -418,20 +402,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
 
+      if (msg?.type === "PING") {
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (msg.type === "FETCH_SELF") {
+        const profile = await fetchCurrentUserProfile();
+        sendResponse(profile);
+        return;
+      }
+
       if (msg.type === "FETCH_COURSES_FILTERED") {
         const courses = await fetchMyCoursesFiltered(
           msg.termFilter || "Fall 2025",
         );
         sendResponse({ ok: true, courses });
-        return;
-      }
-      if (msg?.type === "PING") {
-        sendResponse({ ok: true });
-        return; // no async work
-      }
-      if (msg.type === "FETCH_SELF") {
-        const profile = await fetchCurrentUserProfile();
-        sendResponse(profile);
         return;
       }
 
@@ -467,7 +453,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const results = [];
         for (let i = 0; i < sectionIds.length; i++) {
           const sid = sectionIds[i];
-          // (If you still use per-section sends; not used in the current flow)
           const one = await sendLinkToCourseStudents(
             { courseId, subject, body, csrfToken },
             (note) =>
@@ -488,6 +473,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: String(e) });
     }
   })();
-
   return true;
 });
